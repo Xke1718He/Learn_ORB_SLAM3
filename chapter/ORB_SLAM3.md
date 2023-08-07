@@ -1,50 +1,119 @@
-# ORB_SLAM3
+# ORB_SLAM3 系统初始化
 
-## ORB_SLAM3 系统初始化
-
-ORB_SLAM3的初始化主要是为了：
+ORB_SLAM3的系统初始化主要是：
 
 * 从配置文件中读取需要的**参数**
 * 创建**跟踪线程，局部建图线程，闭环线程**三大主线程，以及可视化线程
-* 创建后面需要的对象：`ORB词袋、关键帧数据库、多地图`等
+* 创建后面需要的对象：**ORB词袋**(`ORBVocabulary`)、**关键帧数据库**(`KeyFrameDatabase`)、**多地图**(`Atlas`)等
 
 其步骤如下：
-* 步骤：
-	1. 检测配置文件能否打开
-	2. 加载**ORB词袋**(`ORBVocabulary`)
-	3. 创建**关键帧数据库**(`KeyFrameDatabase`)
-	4. 创建**多地图**(`Atlas`)
-	5. 创建**跟踪线程**(`Tracking`)
-	6. 创建**局部建图线程**(`LocalMapping`)
-	7. 创建**闭环线程**(`LoopClosing`)
-	8. 设置**线程间的指针**
+1. 检测配置文件能否打开
+2. 加载**ORB词袋**(`ORBVocabulary`)
+3. 创建**关键帧数据库**(`KeyFrameDatabase`)
+4. 创建**多地图**(`Atlas`)
+5. 创建**跟踪线程**(`Tracking`)
+6. 创建**局部建图线程**(`LocalMapping`)
+7. 创建**闭环线程**(`LoopClosing`)
+8. 设置**线程间的指针**
 
 这里主要讲解**跟踪线程**的初始化，而对于**局部建图线程，闭环线程**的初始化只是简单的参数赋值
 ## 跟踪线程
-### A.相机模型
-从配置文件中读取`相机参数`，创建相机模型(`Pinhole/KannalaBrandt8`)
-* `Pinhole/KannalaBrandt8`： 继承自`GeometricCamera`，输入：相机参数（`fx,fy,cx,cy, k1, k2, p1, p2, k3`/`fx,fy,cx,cy,k1,k2,k3,k4`）
-* 添加相机模型到多地图系统中(`mpAtlas->AddCamera(mpCamera)`)
-
-对于针孔相机模型`Pinhole`可以参考文章：[【二】[详细]针孔相机模型、相机镜头畸变模型、相机标定与OpenCV实现](https://blog.csdn.net/He3he3he/article/details/98769173)
-
+```cpp
+mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
+                         mpAtlas, mpKeyFrameDatabase, strSettingsFile, 
+                         mSensor, settings_, strSequence);
 ```
-OpenCV 中的 `FileStorage` 类能够读写`.xml`和`.yaml`文件，以 `FileNode` 为单位存储数据，其有以下操作：
-* 写入:`FileStorage::WRITE`
-* 追加:`FileStorage::APPEND`
-* 读取:`FileStorage::WRITE`
+### A.相机模型
+* 从配置文件中读取`相机参数`
+```cpp
+bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
+```
+* 创建相机模型(`Pinhole/KannalaBrandt8`)
+    * `Pinhole/KannalaBrandt8`： 继承自`GeometricCamera`，输入：相机参数（`fx,fy,cx,cy, k1, k2, p1, p2, k3`/`fx,fy,cx,cy,k1,k2,k3,k4`）
+    * 添加相机模型到多地图系统中(`mpAtlas->AddCamera(mpCamera)`)
+	* 对于针孔相机模型`Pinhole`可以参考文章：[【二】[详细]针孔相机模型、相机镜头畸变模型、相机标定与OpenCV实现](https://blog.csdn.net/He3he3he/article/details/98769173)
+* `GeometricCamera`
+```cpp
+    class GeometricCamera {
+    friend class boost::serialization::access;
+    template<class Archive>
+    void serialize(Archive& ar, const unsigned int version)
+    {
+        ar & mnId;
+        ar & mnType;
+        ar & mvParameters;
+    }
+public:
+    //构造函数
+    GeometricCamera() {}
+    GeometricCamera(const std::vector<float> &_vParameters) : mvParameters(_vParameters) {}
+    //析构函数
+    ~GeometricCamera() {}
+    //3D->2D
+    virtual cv::Point2f project(const cv::Point3f &p3D) = 0;
+    virtual Eigen::Vector2d project(const Eigen::Vector3d & v3D) = 0;
+    virtual Eigen::Vector2f project(const Eigen::Vector3f & v3D) = 0;
+    virtual Eigen::Vector2f projectMat(const cv::Point3f& p3D) = 0;
+
+    virtual float uncertainty2(const Eigen::Matrix<double,2,1> &p2D) = 0;
+     //2d->3d
+    virtual Eigen::Vector3f unprojectEig(const cv::Point2f &p2D) = 0;
+    virtual cv::Point3f unproject(const cv::Point2f &p2D) = 0;
+
+    virtual Eigen::Matrix<double,2,3> projectJac(const Eigen::Vector3d& v3D) = 0;
+
+    virtual bool ReconstructWithTwoViews(const std::vector<cv::KeyPoint>& vKeys1, const std::vector<cv::KeyPoint>& vKeys2, const std::vector<int> &vMatches12, Sophus::SE3f &T21, std::vector<cv::Point3f> &vP3D, std::vector<bool> &vbTriangulated) = 0;
+
+    virtual cv::Mat toK() = 0;
+    virtual Eigen::Matrix3f toK_() = 0;
+
+    virtual bool epipolarConstrain(GeometricCamera* otherCamera, const cv::KeyPoint& kp1, const cv::KeyPoint& kp2, const Eigen::Matrix3f& R12, const Eigen::Vector3f& t12, const float sigmaLevel, const float unc) = 0;
+
+    float getParameter(const int i){return mvParameters[i];}
+    void setParameter(const float p, const size_t i){mvParameters[i] = p;}
+
+    size_t size(){return mvParameters.size();}
+
+    virtual bool matchAndtriangulate(const cv::KeyPoint& kp1, const cv::KeyPoint& kp2, GeometricCamera* pOther, Sophus::SE3f& Tcw1, Sophus::SE3f& Tcw2, const float sigmaLevel1, const float sigmaLevel2, Eigen::Vector3f& x3Dtriangulated) = 0;
+
+    unsigned int GetId() { return mnId; }
+
+    unsigned int GetType() { return mnType; }
+
+    const static unsigned int CAM_PINHOLE = 0;
+    const static unsigned int CAM_FISHEYE = 1;
+
+    static long unsigned int nNextId;
+
+protected:
+    std::vector<float> mvParameters;
+
+    unsigned int mnId;
+
+    unsigned int mnType;
+    };
 ```
 
 ### B.ORB特征提取器
 
-从配置文件中读取`ORB参数`，创建ORB特征提取器(`ORBextractor`)，其主要参数：
+从配置文件中读取`ORB参数`，其主要参数
+
 * **nFeatures**: 特征点的数量
 * **Scalefactor**：特征金字塔的尺度因子
 * **nLevels**: 特征金字塔的层数
 * **iniThFAST**: 初始Fast阈值
 * **minThFAST**: 最小Fast阈值
 
-`ORBextractor`的构造函数如下，需要注意的是单目情况下，特征点的数目增加为5倍
+```cpp
+bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
+```
+创建ORB特征提取器(`ORBextractor`)，`ORBextractor`的构造函数如下
+
+```cpp
+ORBextractor(int nfeatures, float scaleFactor, int nlevels,
+             int iniThFAST, int minThFAST);
+```
+需要注意的是单目情况下，特征点的数目增加为**5**倍
 ```cpp
 mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 //相对于普通情况，单目初始化时提取的特征点数量更多
@@ -52,13 +121,6 @@ mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST
 ```
 构造`ORBextractor`特征提取器主要分为如下几个步骤：
 1. 设置图像金字塔的`尺度因子`、`逆尺度因子`、`方差`
-```C++
-mvScaleFactor.resize(nlevels);
-mvInvScaleFactor.resize(nlevels);
-
-mvLevelSigma2.resize(nlevels);
-mvInvLevelSigma2.resize(nlevels);
-```
 $$
 \begin{array}{l}
 mvScalefactor_{i} = mvScalefactor_{i-1} \cdot scalefactor \\
@@ -67,10 +129,30 @@ mvLevelSigma2_{i} = mvScalefactor_{i}^{2} \\
 mvInvLevelSigma2_{i} = \frac{1}{mvLevelSigma2_{i}} 
 \end{array}
 $$
-**图像金字塔**如下：
-![](https://img-blog.csdnimg.cn/img_convert/740b8d6c077f469ac02e1c9f0ca4265a.png)
-2. `预分配`每层金字塔的特征点数量
-* 分配的方式：先分配前$n-1$层，再将剩余的特征点$N-sum(0,n-1)$分配给第n层。
+```C++
+    mvScaleFactor.resize(nlevels);  
+    mvLevelSigma2.resize(nlevels);
+    mvScaleFactor[0]=1.0f;
+    mvLevelSigma2[0]=1.0f;
+    for(int i=1; i<nlevels; i++)  
+    {
+        mvScaleFactor[i]=mvScaleFactor[i-1]*scaleFactor;
+        mvLevelSigma2[i]=mvScaleFactor[i]*mvScaleFactor[i];
+    }
+
+    mvInvScaleFactor.resize(nlevels);
+    mvInvLevelSigma2.resize(nlevels);
+    for(int i=0; i<nlevels; i++)
+    {
+        mvInvScaleFactor[i]=1.0f/mvScaleFactor[i];
+        mvInvLevelSigma2[i]=1.0f/mvLevelSigma2[i];
+    }
+```
+2. 构造图像金字塔，**图像金字塔**如下：
+    ![](https://img-blog.csdnimg.cn/img_convert/740b8d6c077f469ac02e1c9f0ca4265a.png)
+3. `预分配`每层金字塔的特征点数量，其分配方式：
+   * 先分配前$n-1$层，再将剩余的特征点$N-sum(0,n-1)$分配给第n层。
+
 
 每层金字塔期望的特征点数量：
 
@@ -94,17 +176,33 @@ $$
 $$
 N_{i}=\frac{N\left(1-s^{2}\right)}{C\left(1-\left(s^{2}\right)^{m}\right)} C\left(s^{2}\right)^{i}=\frac{N\left(1-s^{2}\right)}{1-\left(s^{2}\right)^{m}}\left(s^{2}\right)^{i}
 $$
-在ORB-SLAM3 的代码里，`不是按照面积均摊的`，而是`按照面积的开方`来均摊特征点的，也就是将上述公式中的$s^2$换成$s$ 即可。
+在ORB-SLAM3 的代码里，**不是按照面积均摊的，而是按照面积的开方**来均摊特征点的，也就是将上述公式中的$s^2$换成$s$ 即可。
+```cpp
+mnFeaturesPerLevel.resize(nlevels);
+float factor = 1.0f / scaleFactor;
+float nDesiredFeaturesPerScale = nfeatures*(1 - factor)/(1 - (float)pow((double)factor, (double)nlevels));
 
-3. 初始化pattern
+int sumFeatures = 0;
+for( int level = 0; level < nlevels-1; level++ )
+{
+    mnFeaturesPerLevel[level] = cvRound(nDesiredFeaturesPerScale);
+    sumFeatures += mnFeaturesPerLevel[level];
+    nDesiredFeaturesPerScale *= factor;
+}
+mnFeaturesPerLevel[nlevels-1] = std::max(nfeatures - sumFeatures, 0);
+```
+
+4. 初始化pattern
 pattern为$32\cdot8\cdot4 = 1024$，其中pattern是ORB预设好的。
 参考文献：《BRIEF: Binary Robust Independent Elementary Features 》
-
-
 ![](https://img-blog.csdnimg.cn/img_convert/b62ce577715e34aca0ee591b3c67fd33.png)
 
-
-4. 预先计算灰度质心法每行对应的终点
+```cpp
+    const int npoints = 512;
+    const Point* pattern0 = (const Point*)bit_pattern_31_;	
+    std::copy(pattern0, pattern0 + npoints, std::back_inserter(pattern));
+```
+5. 预先计算灰度质心法每行对应的终点
 	1. 先算弧`A->B`($v\in(0,vmax )$)段
 	2. 再算弧`C->B`($v\in(r,vmin )$)段
 
@@ -112,7 +210,6 @@ pattern为$32\cdot8\cdot4 = 1024$，其中pattern是ORB预设好的。
 	//umax存放u轴的最大值，因为只有1/4圆，所以size为半径+1
    umax.resize(HALF_PATCH_SIZE + 1);
 	
-
     int v,v0,vmax = cvFloor(HALF_PATCH_SIZE * sqrt(2.f) / 2 + 1);//为v轴根号2/2处,也就是
     
     int vmin = cvCeil(HALF_PATCH_SIZE * sqrt(2.f) / 2);
@@ -136,6 +233,7 @@ pattern为$32\cdot8\cdot4 = 1024$，其中pattern是ORB预设好的。
 ![](https://img-blog.csdnimg.cn/img_convert/e0ed72ff1ad10da140f9bd1f3a4595a9.png)
 注意：这里算出来`vmax`和`vmin`是相等的，可以看打印出来的点中有一个红圈套篮圈
 ![](https://img-blog.csdnimg.cn/img_convert/965d6697172ff844656654e069a4d074.png)
+
 ### C.IMU预积分
 从配置文件中读取IMU参数，创建IMU标定(`IMU::Calib`)、IMU预积分(`IMU::Preintegrated`)
 * Tbc：相机到IMU的变换矩阵
@@ -156,6 +254,10 @@ pattern为$32\cdot8\cdot4 = 1024$，其中pattern是ORB预设好的。
 	* 符号：$\sigma_{ba}$
 
 这里主要创建**来自上一关键帧的IMU预积分**，主要参数为**高斯白噪声协方差**和**随机游走协方差**：
+```cpp
+mpImuCalib = new IMU::Calib(Tbc,Ng*sf,Na*sf,Ngw/sf,Naw/sf);
+mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+```
 高斯白噪声的方差从连续时间到离散时间需要乘以一个$\frac{1}{\sqrt{freq}}$   
 $$
 \begin{array}{c}
@@ -192,16 +294,40 @@ N_{gw}^{2} & 0 & 0 & 0 & 0 & 0\\
   0&  0&  0&  0&  0&N_{aw}^{2}
 \end{bmatrix}
 $$
-## 1.构造Frame
+```cpp
+void Calib::Set(const Sophus::SE3<float> &sophTbc, const float &ng, const float &na, const float &ngw, const float &naw)
+{
+    mbIsSet = true;
+    const float ng2 = ng * ng;
+    const float na2 = na * na;
+    const float ngw2 = ngw * ngw;
+    const float naw2 = naw * naw;
+
+    mTbc = sophTbc;
+    mTcb = mTbc.inverse();
+    // 噪声协方差
+    Cov.diagonal() << ng2, ng2, ng2, na2, na2, na2;
+    // 随机游走协方差
+    CovWalk.diagonal() << ngw2, ngw2, ngw2, naw2, naw2, naw2;
+}
+```
+# 构造Frame
+
 为了构建一帧**Frame**，主要的步骤如下：
 1. 提取ORB特征点(`ExtractORB`)
 2. 对提取的特征点进行矫正(`cv::undistortPoints`)
 3. 计算去畸变后的图像边界(`ComputeImageBounds`)
 4. 将特征点分配到网格中(`AssignFeaturesToGrid`)
-### A.提取ORB特征点
-首先需要对当前帧图像进行特征点的提取：`计算图像金字塔`，`提取Fast角点`，`四叉树均匀化`，`计算特征点的方向`，`计算特征点的描述子`
-#### 1.计算图像金字塔
-![在这里插入图片描述](https://img-blog.csdnimg.cn/4ec888989ca544f4afab9c1631219a43.png)
+## A.提取ORB特征点
+首先需要对当前帧图像进行特征点的提取：
+
+* 计算图像金字塔(`ComputePyramid`)
+* 提取Fast角点(`ComputeKeyPointsOctTree`)
+  * 四叉树均匀化(`DistributeOctTree`)
+* 计算特征点的方向(`computeOrientation`)
+* 计算特征点的描述子(`computeDescriptors`)
+
+### 1.计算图像金字塔
 ```cpp
     void ORBextractor::ComputePyramid(cv::Mat image)
     {
@@ -212,50 +338,46 @@ $$
             Size wholeSize(sz.width + EDGE_THRESHOLD*2, sz.height + EDGE_THRESHOLD*2);
             Mat temp(wholeSize, image.type()), masktemp;
             mvImagePyramid[level] = temp(Rect(EDGE_THRESHOLD, EDGE_THRESHOLD, sz.width, sz.height));
+            //0层及以上
+            if( level != 0 )
+            {
+                //将上一层金字塔图像根据设定sz缩放到当前层级
+                resize(mvImagePyramid[level-1],	//输入图像
+                       mvImagePyramid[level], 	//输出图像
+                       sz, 						//输出图像的尺寸
+                       0, 						//水平方向上的缩放系数，留0表示自动计算
+                       0,  						//垂直方向上的缩放系数，留0表示自动计算
+                       cv::INTER_LINEAR);		//图像缩放的差值算法类型，这里的是线性插值算法
 
-        // Compute the resized image
-		//计算第0层以上resize后的图像
-        if( level != 0 )
-        {
-			//将上一层金字塔图像根据设定sz缩放到当前层级
-            resize(mvImagePyramid[level-1],	//输入图像
-				   mvImagePyramid[level], 	//输出图像
-				   sz, 						//输出图像的尺寸
-				   0, 						//水平方向上的缩放系数，留0表示自动计算
-				   0,  						//垂直方向上的缩放系数，留0表示自动计算
-				   cv::INTER_LINEAR);		//图像缩放的差值算法类型，这里的是线性插值算法
 
-			//把源图像拷贝到目的图像的中央，四面填充指定的像素。图片如果已经拷贝到中间，只填充边界
-			//TODO 貌似这样做是因为在计算描述子前，进行高斯滤波的时候，图像边界会导致一些问题，说不明白
-			//EDGE_THRESHOLD指的这个边界的宽度，由于这个边界之外的像素不是原图像素而是算法生成出来的，所以不能够在EDGE_THRESHOLD之外提取特征点			
-            copyMakeBorder(mvImagePyramid[level], 					//源图像
-						   temp, 									//目标图像（此时其实就已经有大了一圈的尺寸了）
-						   EDGE_THRESHOLD, EDGE_THRESHOLD, 			//top & bottom 需要扩展的border大小
-						   EDGE_THRESHOLD, EDGE_THRESHOLD,			//left & right 需要扩展的border大小
-                           BORDER_REFLECT_101+BORDER_ISOLATED);     //扩充方式，opencv给出的解释：
-			
-			/*Various border types, image boundaries are denoted with '|'
-			* BORDER_REPLICATE:     aaaaaa|abcdefgh|hhhhhhh
-			* BORDER_REFLECT:       fedcba|abcdefgh|hgfedcb
-			* BORDER_REFLECT_101:   gfedcb|abcdefgh|gfedcba
-			* BORDER_WRAP:          cdefgh|abcdefgh|abcdefg
-			* BORDER_CONSTANT:      iiiiii|abcdefgh|iiiiiii  with some specified 'i'
-			*/
-			
-			//BORDER_ISOLATED	表示对整个图像进行操作
-            // https://docs.opencv.org/3.4.4/d2/de8/group__core__array.html#ga2ac1049c2c3dd25c2b41bffe17658a36
+                copyMakeBorder(mvImagePyramid[level], 				//源图像
+                               temp, 								//目标图像（此时其实就已经有大了一圈的尺寸了）
+                               EDGE_THRESHOLD, EDGE_THRESHOLD, 		//top & bottom 需要扩展的border大小
+                               EDGE_THRESHOLD, EDGE_THRESHOLD,		//left & right 需要扩展的border大小
+                               BORDER_REFLECT_101+BORDER_ISOLATED);  //扩充方式，opencv给出的解释：
 
-        }
-        else
-        {
-			//对于底层图像，直接就扩充边界了
-            //?temp 是在循环内部新定义的，在该函数里又作为输出，并没有使用啊！
-            copyMakeBorder(image,			//这里是原图像
-						   temp, EDGE_THRESHOLD, EDGE_THRESHOLD, EDGE_THRESHOLD, EDGE_THRESHOLD,
-                           BORDER_REFLECT_101);            
-        }
-    }
+                /*Various border types, image boundaries are denoted with '|'
+                * BORDER_REPLICATE:     aaaaaa|abcdefgh|hhhhhhh
+                * BORDER_REFLECT:       fedcba|abcdefgh|hgfedcb
+                * BORDER_REFLECT_101:   gfedcb|abcdefgh|gfedcba
+                * BORDER_WRAP:          cdefgh|abcdefgh|abcdefg
+                * BORDER_CONSTANT:      iiiiii|abcdefgh|iiiiiii  with some specified 'i'
+                */
 
+                //BORDER_ISOLATED	表示对整个图像进行操作
+            }
+            else
+            {
+                //对于底层图像，直接就扩充边界了
+                copyMakeBorder(image,
+                               temp,
+                               EDGE_THRESHOLD,
+                               EDGE_THRESHOLD,
+                               EDGE_THRESHOLD,
+                               EDGE_THRESHOLD,
+                               BORDER_REFLECT_101);            
+            }
+    	}
     }
 ```
 * 对于level = 0
@@ -283,34 +405,32 @@ void cv::copyMakeBorder
 	//BORDER_CONSTANT(常量):      iiiiii|abcdefgh|iiiiiii  with some specified i
 )
 ```
-#### 2.提取Fast角点
+### 2.提取Fast角点
 对于金字塔的每一层，将其网格化，每个格子大小为$w = 35$：
 * 左上角(**红色**)：$\left(minBorderX, minBorderY\right)$
 * 右下角：$\left(maxBorderY, maxBorderY\right)$
 * 网格的行数：$rows=\frac{\left(maxBorderY-minBorderY\right)}{w}$
 * 网格的列数：$cols=\frac{\left(maxBorderX-minBorderX\right)}{w}$
+* 网格的宽度：$wCell = ceil\left(\frac{maxBorderX-minBorderX}{cols}\right)$
+* 网格的高度：$hCell = ceil\left(\frac{maxBorderY-minBorderY}{rows}\right)$
+
 这时候可以在每个格子中提取Fast角点， 其中格子的范围为：
-* $iniX = minBorderX + j \cdot wCell$
-* $iniY = minBorderY + i \cdot hCell$
+* $iniX = minBorderX + j \cdot wCell, j \in \left(0,nCols\right)$
+* $iniY = minBorderY + i \cdot hCell, i\in \left(0,nRows\right)$
 * $maxX = iniX + wCell + 6$
 * $maxY = iniY + hCell + 6$
-**FAST角点**在`(iniX, iniY, maxX, maxY)`范围内提取，这里使用**高低阈值**
-![在这里插入图片描述](https://img-blog.csdnimg.cn/1094569515d9441fa15c6f7e2a9e8a66.png)
 
+**FAST角点**在`(iniX, iniY, maxX, maxY)`范围内提取，这里使用**高低阈值**
 ```cpp
-FAST(mvImagePyramid[level].rowRange(iniY,maxY).colRange(iniX,maxX),	//待检测的图像，这里就是当前遍历到的图像块
-	vKeysCell,			//存储角点位置的容器
-	iniThFAST,			//检测阈值
-	true);				//使能非极大值抑制
+FAST(mvImagePyramid[level].rowRange(iniY,maxY).colRange(iniX,maxX),
+	vKeysCell, iniThFAST, true);
 if(vKeysCell.empty())
 {
-	//那么就使用更低的阈值来进行重新检测
-	FAST(mvImagePyramid[level].rowRange(iniY,maxY).colRange(iniX,maxX),	//待检测的图像
-		 vKeysCell,		//存储角点位置的容器
-		 minThFAST,		//更低的检测阈值
-		 true);			//使能非极大值抑制
+	FAST(mvImagePyramid[level].rowRange(iniY,maxY).colRange(iniX,maxX),	
+		 vKeysCell, minThFAST, true);
 }
 ```
+![在这里插入图片描述](https://img-blog.csdnimg.cn/1094569515d9441fa15c6f7e2a9e8a66.png)
 提取到的角点的原点位于`紫色`，需要将其变换到`红色`
 $$
 \begin{array}{c}
@@ -318,7 +438,15 @@ x = x + j \cdot wCell \\
 y = y + i \cdot hCell
 \end{array}
 $$
-#### 2.四叉树均匀化
+```cpp
+for(vector<cv::KeyPoint>::iterator vit=vKeysCell.begin(); 	vit!=vKeysCell.end();vit++)
+{
+    (*vit).pt.x+=j*wCell;
+    (*vit).pt.y+=i*hCell;
+    vToDistributeKeys.push_back(*vit);
+}
+```
+### 3.四叉树均匀化
 四叉树的节点如下：
 ```cpp
 class ExtractorNode
@@ -376,7 +504,18 @@ x = x + minBorderX \\
 y = y + minBorderY
 \end{array}
 $$
-#### 3.计算特征点方向
+```cpp
+        const int scaledPatchSize = PATCH_SIZE*mvScaleFactor[level];
+        const int nkps = keypoints.size();
+        for(int i=0; i<nkps ; i++)
+        {
+            keypoints[i].pt.x+=minBorderX;
+            keypoints[i].pt.y+=minBorderY;
+            keypoints[i].octave=level;
+            keypoints[i].size = scaledPatchSize;
+        }
+```
+### 4.计算特征点方向
 遍历所有金字塔层，计算当前金字塔层所有特征点的方向，步骤：
 1. 计算图像在x, y方向的矩
 $$
@@ -398,7 +537,6 @@ $$
 ```cpp
 static float IC_Angle(const Mat& image, Point2f pt,  const vector<int> & u_max)
 {
-	//图像的矩，前者是按照图像块的y坐标加权，后者是按照图像块的x坐标加权
     int m_01 = 0, m_10 = 0;
 
 	//获得这个特征点所在的图像块的中心点坐标灰度值的指针center
@@ -455,7 +593,7 @@ m_{01} & = \sum yI(x,y) \\ & = yI(x,y) - yI(x,-y) \\ & = y(I(x,y) - I(x,-y))
 \end{align}
 $$
 
-#### 4.计算特征点的描述子
+### 5.计算特征点的描述子
 遍历所有金字塔层，计算当前金字塔层所有特征点的描述子，步骤：
 1. 高斯模糊
 2. 旋转
@@ -527,7 +665,7 @@ static void computeOrbDescriptor(const KeyPoint& kpt,
     #undef GET_VALUE
 }
 ```
-### B.对提取的特征点进行矫正
+## B.对提取的特征点进行矫正
 ```cpp
 void cv::undistortPoints
 (
@@ -539,7 +677,7 @@ void cv::undistortPoints
 	InputArray _P_ = noArray //新的相机矩阵或者投影矩阵
 )
 ```
-### C.将特征点分配到网格中
+## C.将特征点分配到网格中
 将特征点分配到网格中主要的作用：加速特征点的搜索
 * `FRAME_GRID_ROWS`：48
 * `FRAME_GRID_COLS`：64
@@ -549,6 +687,44 @@ posX & = \left (x-mnMinX\right )\cdot \frac{ {\small FRAME\_GRID\_COLS}  }{mnMax
 posY & = \left (y-mnMinY\right )\cdot \frac{ {\small FRAME\_GRID\_ROWS}  }{mnMaxY-mnMinY} 
 \end{align}
 $$
+```cpp
+void Frame::AssignFeaturesToGrid()
+{
+    // Fill matrix with points
+    // Step 1  给存储特征点的网格数组 Frame::mGrid 预分配空间
+    const int nCells = FRAME_GRID_COLS*FRAME_GRID_ROWS;
+
+    int nReserve = 0.5f*N/(nCells);
+
+    // 开始对mGrid这个二维数组中的每一个vector元素遍历并预分配空间
+    for(unsigned int i=0; i<FRAME_GRID_COLS;i++)
+        for (unsigned int j=0; j<FRAME_GRID_ROWS;j++){
+            mGrid[i][j].reserve(nReserve);
+            if(Nleft != -1){
+                mGridRight[i][j].reserve(nReserve);
+            }
+        }
+
+    // Step 2 遍历每个特征点，将每个特征点在mvKeysUn中的索引值放到对应的网格mGrid中
+
+    for(int i=0;i<N;i++)
+    {
+        const cv::KeyPoint &kp = (Nleft == -1) ? mvKeysUn[i]
+                                                 : (i < Nleft) ? mvKeys[i]
+                                                                 : mvKeysRight[i - Nleft];
+        // 存储某个特征点所在网格的网格坐标，nGridPosX范围：[0,FRAME_GRID_COLS], nGridPosY范围：[0,FRAME_GRID_ROWS]
+        int nGridPosX, nGridPosY;
+        // 计算某个特征点所在网格的网格坐标，如果找到特征点所在的网格坐标，记录在nGridPosX,nGridPosY里，返回true，没找到返回false
+        if(PosInGrid(kp,nGridPosX,nGridPosY)){
+            if(Nleft == -1 || i < Nleft)
+                // 如果找到特征点所在网格坐标，将这个特征点的索引添加到对应网格的数组mGrid中
+                mGrid[nGridPosX][nGridPosY].push_back(i);
+            else
+                mGridRight[nGridPosX][nGridPosY].push_back(i - Nleft);
+        }
+    }
+}
+```
 这里介绍ORB_SLAM算法中的双目匹配算法
 # 双目匹配
 在ORB_SLAM采用**粗匹配**和**精匹配**结合的方式来实现双目特征点的精确匹配
