@@ -1309,7 +1309,7 @@ void Tracking::MonocularInitialization()
             // Step 2 在半径窗口内搜索当前帧F2中所有的候选匹配特征点 
             // vbPrevMatched 输入的是参考帧 F1的特征点
             // windowSize = 100，输入最大最小金字塔层级 均为0
-            vector<size_t> vIndices2 = 	F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
+            vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
 ```
 ### 3.通过描述子的距离搜索候选匹配点中的最优与次优
  * 注意：`vMatchedDistance`
@@ -2210,7 +2210,7 @@ void Tracking::CreateInitialMapMonocular()
     initID = pKFcur->mnId;
 }
 ```
-# 误差
+# IMU误差
 ## 1.确定性误差
 * Bias：偏置
 * Scale：实际数值和传感器输出值之间的比值。
@@ -2394,7 +2394,7 @@ $$
 \Delta \tilde{\mathbf{p}}_{i j} \approx \Delta \mathbf{p}_{i j}+\delta \mathbf{p}_{i j}=\mathbf{R}_{i}^{T}\left(\mathbf{p}_{j}-\mathbf{p}_{i}-\mathbf{v}_{i} \cdot \Delta t_{i j}-\frac{1}{2} \mathbf{g} \cdot \Delta t_{i j}^{2}\right)+\delta \mathbf{p}_{i j}
 \end{array}
 $$
-## 噪声分析
+### 噪声分析
 1. $\delta \vec{\phi}_{i j}$：
 $$
 \operatorname{Exp}\left(-\delta \vec{\phi}_{i j}\right)=\prod_{k=i}^{j-1} \operatorname{Exp}\left(-\Delta \tilde{\mathbf{R}}_{k+1 j}^{T} \cdot \mathbf{J}_{r}^{k} \cdot \boldsymbol{\eta}_{k}^{g d} \Delta t\right)
@@ -2431,7 +2431,7 @@ $$
 $$
 \delta \mathbf{p}_{i j}=\sum_{k=i}^{j-1}\left[\delta \mathbf{v}_{i k} \Delta t-\frac{1}{2} \Delta \tilde{\mathbf{R}}_{i k} \cdot\left(\tilde{\mathbf{f}}_{k}-\mathbf{b}_{i}^{a}\right)^{\wedge} \delta \vec{\phi}_{i k} \Delta t^{2}+\frac{1}{2} \Delta \tilde{\mathbf{R}}_{i k} \mathbf{\eta}_{k}^{a d} \Delta t^{2}\right]
 $$
-## 噪声更新
+### 噪声更新
 1. $\delta\overrightarrow{\phi}_{ij-1}\to  \delta\overrightarrow{\phi}_{ij}$
 $$
 \begin{aligned}
@@ -2514,7 +2514,7 @@ $$
  \Sigma_{i j}^{\gamma}=\Sigma_{i j-1}^{\gamma}+\Sigma_{\gamma}
 \end{array}
 $$
-## 预积分测量值更新
+### 预积分测量值更新
 当bias不发生变化时
 * $\Delta \tilde{R} _{ij-1}\to \Delta \tilde{R}_{ij}$
 $$
@@ -2541,7 +2541,7 @@ $$
 \triangleq \Delta \tilde{\mathbf{p}}_{i j-1}  + \Delta \tilde{\mathbf{v}}_{i j-1} \Delta t+\frac{1}{2} \Delta \tilde{\mathbf{R}}_{i j-1} \cdot\left(\tilde{\mathbf{f}}_{j-1}-\mathbf{b}_{i}^{a}\right) \Delta t^{2}
 \end{array}
 $$
-## 预积分测量值更新
+### 预积分测量值更新
 当bias发生变化时，利用**线性化**来进行bias变化时预积分项的**一阶近似更新**
 * bias更新
 	* $\bar{b}$：旧的bias
@@ -2653,7 +2653,7 @@ $$
 \frac{\partial \Delta \overline{\mathbf{p}}_{i j}}{\partial \overline{\mathbf{b}}^{a}} & =\sum_{k=i}^{j-1}\left[\frac{\partial \Delta \overline{\mathbf{v}}_{i k}}{\partial \overline{\mathbf{b}}^{a}} \Delta t-\frac{1}{2} \Delta \overline{\mathbf{R}}_{i k} \Delta t^{2}\right]
 \end{aligned}
 $$
-## Jacobian更新
+### Jacobian更新
 * $\frac{\partial \Delta \overline{\mathbf{v}}_{i j-1}}{\partial \overline{\mathbf{b}}^{g}} \to \frac{\partial \Delta \overline{\mathbf{v}}_{i j}}{\partial \overline{\mathbf{b}}^{g}}$
 $$
 \begin{array}{l}
@@ -2705,7 +2705,7 @@ $$
 -\underbrace{\Delta \overline{\mathbf{R}}_{j j}^{T}}_{I}  \mathbf{J}_{r}^{k} \Delta t
 \end{array}
 $$
-## 残差
+### 残差
 * 预积分的测量值采用**一阶近似**修正，免去了积分重新运算，降低计算量
 * 状态包含：$\mathbf{R}_{i}, \mathbf{p}_{i}, \mathbf{v}_{i}, \mathbf{R}_{j}, \mathbf{p}_{j}, \mathbf{v}_{j}, \delta \mathbf{b}_{i}^{g}, \delta \mathbf{b}_{i}^{a}$，其中关于bias的是**bias的偏差**
 $$
@@ -2718,7 +2718,7 @@ $$
 & \triangleq \Delta \mathbf{p}_{i j}-\Delta \hat{\mathbf{p}}_{i j}
 \end{aligned}
 $$
-### $\mathbf{r}_{\Delta \mathbf{R}_{i j}}$
+#### $\mathbf{r}_{\Delta \mathbf{R}_{i j}}$
 * $\mathbf{r}_{\Delta \mathbf{R}_{i j}}$关于$\delta \vec{\phi}_{i}$的jacobian
 $$
 \begin{aligned}
@@ -2788,7 +2788,7 @@ $$
 $$
 \frac{\partial \mathbf{r}_{\Delta \mathbf{R}_{i j}}}{\partial \widetilde{\delta \mathbf{b}_{i}^{g}}}=\frac{\partial \mathbf{r}_{\Delta \mathbf{R}_{i j}}}{\partial \delta \mathbf{b}_{i}^{g}}=-\mathbf{J}_{r}^{-1}\left(\mathbf{r}_{\Delta \mathbf{R}_{i j}}\right) \cdot \operatorname{Exp}\left(-\mathbf{r}_{\Delta \mathbf{R}_{i j}}\right) \cdot \mathbf{J}_{r}\left(\frac{\partial \Delta \overline{\mathbf{R}}_{i j}}{\partial \overline{\mathbf{b}}^{g}} \delta \mathbf{b}_{i}^{g}\right) \cdot \frac{\partial \Delta \overline{\mathbf{R}}_{i j}}{\partial \overline{\mathbf{b}}^{g}}
 $$
-### $\mathbf{r}_{\Delta \mathbf{v}_{i j}}$
+#### $\mathbf{r}_{\Delta \mathbf{v}_{i j}}$
 *  $\mathbf{r}_{\Delta \mathbf{v}_{i j}}$关于$\delta \vec{\phi}_{i}$的jacobian
 $$
 \begin{aligned}
@@ -2851,7 +2851,7 @@ $$
 \frac{\partial \mathbf{r}_{\Delta \mathbf{v}_{i j}}}{\partial \widetilde{\delta \mathbf{b}_{i}^{\mathrm{a}}}}=\frac{\partial \mathbf{r}_{\Delta \mathbf{v}_{i j}}}{\partial \delta \mathbf{b}_{i}^{\mathrm{a}}}=-\frac{\partial \Delta \overline{\mathbf{v}}_{i j}}{\partial \mathbf{b}^{a}}
 $$
 
-### $\mathbf{r}_{\Delta \mathbf{p}_{i j}}$
+#### $\mathbf{r}_{\Delta \mathbf{p}_{i j}}$
 *   $\mathbf{r}_{\Delta \mathbf{p}_{i j}}$关于$\delta \vec{\phi}_{i}$的jacobian
 $$
 \begin{aligned}
@@ -2923,7 +2923,10 @@ $$
 $$
 \frac{\partial \mathbf{r}_{\Delta \mathbf{p}_{i j}}}{\partial \delta \mathbf{b}_{i}^{a}}=-\frac{\partial \Delta \overline{\mathbf{p}}_{i j}}{\partial \mathbf{b}^{a}}
 $$
+# PreintegrateIMU
+
 这篇博文主要分享**ORB_SLAM3**中`Tracking::PreintegrateIMU()`，其主要包括几个部分：
+
 * 获得两帧之间的IMU数据
 * 中值积分
 * IMU状态更新
@@ -3265,7 +3268,7 @@ $$
 ```cpp
 JRg = dRi.deltaR.transpose() * JRg - dRi.rightJ * dt;
 ```
-### 完整代码
+## 完整代码
 ```cpp
 void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration, const Eigen::Vector3f &angVel, const float &dt)
 {
@@ -3346,8 +3349,8 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
     dT += dt;
 }
 ```
-## TrackWithMotionModel
-### 1.更新上一帧位姿
+# TrackWithMotionModel
+## 1.更新上一帧位姿
 `Tracking::UpdateLastFrame()`的主要作用是**更新上一帧的位姿**和**添加一些临时的地图点**，为什么要更新上一帧的位姿，主要是在ORB_SLAM中优化的是**参考关键帧**的位姿，对于**普通帧**，虽然在开始设置了位姿，但是没有参与优化，因此在下一次跟踪时，需要用**优化后的参考关键帧**的位姿更新上一帧的位姿
 ```cpp
     // Update pose according to reference keyframe
@@ -3457,9 +3460,9 @@ $$
 
     }
 ```
-### 2.得到当前帧的初始位姿
+## 2.得到当前帧的初始位姿
 如果IMU已初始化并且不需要`reset`时，使用`PredictStateIMU`来预测当前帧的状态，就不用通过**匀速模型**来得到了
-#### PredictStateIMU
+### PredictStateIMU
 这里有两个变量控制着从哪预测
 * `mbMapUpdated`：地图是否更新
 * `mpLastKeyFrame`：上一关键帧存在
@@ -3584,7 +3587,7 @@ void Frame::SetImuPoseVelocity(const Eigen::Matrix3f &Rwb, const Eigen::Vector3f
     mbHasPose = true;
 }
 ```
-#### 匀速模型
+### 匀速模型
 当无法用`PredictStateIMU`预测当前帧的位姿与速度时，采用**匀速模型**
 
 来看下这个速度$V$是什么：当跟踪成功或者刚刚跟丢，会更新该速度，该速度表示**上一帧到当前帧的变换**，其中$c$当前帧，$l$上一帧，$w$世界坐标系
@@ -3786,9 +3789,9 @@ $$
 ```
 
 
-### 3.优化
+## 3.优化
 得到上一帧与当前帧的匹配关系后，利用`3D-2D`投影关系优化当前帧位姿`PoseOptimization`
-#### PoseOptimization
+### PoseOptimization
 `PoseOptimization`主要的作用是利用**重投影**优化**单帧的位姿**，主要用在`Tracking`的几种跟踪模式`TrackWithMotionModel`、`TrackReferenceKeyFrame`、 `TrackLocalMap`、`Relocalization`中
 ![](https://img-blog.csdnimg.cn/42ae5eb09cab453abc35493835d222f3.png)
 
@@ -3993,7 +3996,7 @@ g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();
 cv::Mat pose = Converter::toCvMat(SE3quat_recov);  
 pFrame->SetPose(pose);
 ```
-### 4.剔除当前帧中地图点中的外点
+## 4.剔除当前帧中地图点中的外点
 ```cpp
     int nmatchesMap = 0;
     for(int i =0; i<mCurrentFrame.N; i++)
