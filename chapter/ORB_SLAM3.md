@@ -1271,166 +1271,8 @@ void Tracking::MonocularInitialization()
 
 **接下来，详细介绍单目初始化中的每一部分**
 ## 3.SearchForInitialization
-`SearchForInitialization`主要的作用是寻找**初始帧F1**与**当前帧F2**之间的匹配关系`vnMatches12`，其输入参数如下：
-|  参数                                                                                                                                                                                                |  描述            |
-|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------------|
-| F1                                                                                                                                                                                               | 初始帧            |
-| F2                                                                                                                                                                                                 | 当前帧            |
-| vbPrevMatched                                                                                                                                                                                      | 初始帧中特征点的坐标     |
-| vnMatches12                                                                                                                                                                                        | 匹配关系           |
-| windowSize                                                                                                                                                                                         | 搜索窗口大小         |  
+[参考](##SearchForInitialization)
 
-其组件包括：搜索窗口、重复匹配过滤、最佳描述子距离、最优与次优比值、旋转直方图
-### 1.旋转直方图的构建
-```cpp
-        // Step 1 构建旋转直方图，HISTO_LENGTH = 30
-        vector<int> rotHist[HISTO_LENGTH];
-        // 每个bin里预分配500个，因为使用的是vector不够的话可以自动扩展容量
-        for(int i=0;i<HISTO_LENGTH;i++)
-            rotHist[i].reserve(500);
-        //! 原作者代码是 const float factor = 1.0f/HISTO_LENGTH; 是错误的，更改为下面代码
-        // const float factor = HISTO_LENGTH/360.0f;
-        const float factor = 1.0f/HISTO_LENGTH;
-```
-### 2.搜索候选匹配点
-遍历`F1`中的所有特征点，在`F2`上寻找候选匹配点
-![在这里插入图片描述](https://img-blog.csdnimg.cn/470f6f5fa6cd49acb5f26a2c7bae9d8e.png)
-
-```cpp
-        // 遍历帧1中的所有特征点
-        for(size_t i1=0, iend1=F1.mvKeysUn.size(); i1<iend1; i1++)
-        {
-            cv::KeyPoint kp1 = F1.mvKeysUn[i1];
-            int level1 = kp1.octave;
-            // 只使用原始图像上提取的特征点
-            if(level1>0)
-                continue;
-
-            // Step 2 在半径窗口内搜索当前帧F2中所有的候选匹配特征点 
-            // vbPrevMatched 输入的是参考帧 F1的特征点
-            // windowSize = 100，输入最大最小金字塔层级 均为0
-            vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
-```
-### 3.通过描述子的距离搜索候选匹配点中的最优与次优
- * 注意：`vMatchedDistance`
-	* 描述：**vMatchedDistance**的size为**F2**的特征点数目，**vMatchedDistance**用于存储与**F2**的第**index**特征点匹配**最佳**的**描述子距离**
-	* 作用：当**vMatchedDistance**的第**index**位置**非INT_MAX**，那么说明**F1**中已经有特征点和其匹配上了，**F1**中其他特征点想和**F2**中第**index**特征点再匹配上，就必须更好，小于此距离。
-	* 例子：比如`F1`中的特征点`1`与`F2`中的特征点`2`已匹配上，那么`F1`中特征点`2`搜到的候选匹配点包括`0, 1, 2, 3`，分别计算对应的描述子距离，对于`F2`中的特征点`2`，用`vMatchedDistance`对其进行过滤(`5 > 4`)
-	![在这里插入图片描述](https://img-blog.csdnimg.cn/722f3ae0afad4a099b446b96f00d5e38.png)
-
-
-```cpp
-            // Step 3 遍历搜索搜索窗口中的所有潜在的匹配候选点，找到最优的和次优的
-            for(vector<size_t>::iterator vit=vIndices2.begin(); vit!=vIndices2.end(); vit++)
-            {
-                size_t i2 = *vit;
-                // 取出候选特征点对应的描述子
-                cv::Mat d2 = F2.mDescriptors.row(i2);
-                // 计算两个特征点描述子距离
-                int dist = DescriptorDistance(d1,d2);
-
-                if(vMatchedDistance[i2]<=dist)
-                    continue;
-                // 如果当前匹配距离更小，更新最佳次佳距离
-                if(dist<bestDist)
-                {
-                    bestDist2=bestDist;
-                    bestDist=dist;
-                    bestIdx2=i2;
-                }
-                else if(dist<bestDist2)
-                {
-                    bestDist2=dist;
-                }
-            }
-```
-### 4.条件筛选
-* 最佳描述子距离小于阈值
-* 最佳距离比次佳距离要小于设定的比例
-* 删除重复匹配
-```cpp
-            // Step 4 对最优次优结果进行检查，满足阈值、最优/次优比例，删除重复匹配
-            // 即使算出了最佳描述子匹配距离，也不一定保证配对成功。要小于设定阈值
-            if(bestDist<=TH_LOW)
-            {
-                // 最佳距离比次佳距离要小于设定的比例，这样特征点辨识度更高
-                if(bestDist<(float)bestDist2*mfNNratio)
-                {
-                    // 如果找到的候选特征点对应F1中特征点已经匹配过了，说明发生了重复匹配，将原来的匹配也删掉
-                    if(vnMatches21[bestIdx2]>=0)
-                    {
-                        vnMatches12[vnMatches21[bestIdx2]]=-1;
-                        nmatches--;
-                    }
-                    // 次优的匹配关系，双向建立
-                    // vnMatches12保存参考帧F1和F2匹配关系，index保存是F1对应特征点索引，值保存的是匹配好的F2特征点索引
-                    vnMatches12[i1]=bestIdx2;
-                    vnMatches21[bestIdx2]=i1;
-                    vMatchedDistance[bestIdx2]=bestDist;
-                    nmatches++;
-
-                    // Step 5 计算匹配点旋转角度差所在的直方图
-                    if(mbCheckOrientation)
-                    {
-                        // 计算匹配特征点的角度差，这里单位是角度°，不是弧度
-                        float rot = F1.mvKeysUn[i1].angle-F2.mvKeysUn[bestIdx2].angle;
-                        if(rot<0.0)
-                            rot+=360.0f;
-                        // 前面factor = HISTO_LENGTH/360.0f 
-                        // bin = rot / 360.of * HISTO_LENGTH 表示当前rot被分配在第几个直方图bin  
-                        int bin = round(rot*factor);
-                        // 如果bin 满了又是一个轮回
-                        if(bin==HISTO_LENGTH)
-                            bin=0;
-                        assert(bin>=0 && bin<HISTO_LENGTH);
-                        rotHist[bin].push_back(i1);
-                    }
-                }
-            }
-```
-* vnMatches21的作用
-	* 描述：**vnMatches21**的size为**F2**的特征点数目，**vnMatches21**用于存储**F1**中与**F2**的第**index**特征点匹配**最佳**的**索引**
-	* 作用：当**vMatches21**的第**index**位置**非-1**，那么说明**F1**中已经有特征点**m**和其匹配上了，如果还有**F1**中其他特征点和**F2**中第**index**特征点匹配上，那么此为重复匹配，上一次的匹配结果**m**就不能要(vnMatches12[m] = -1)，最后将这次的匹配结果保存到**vnMatches21**和**vMatchedDistance**的index位置。
-	* `F1`中的第`0`个特征点和`F2`中的第`3`个特征点已经匹配，现在F1中的第`3`个特征点也和F2中的第`3`个特征点匹配上了，那么需要将F2中的第`3`个特征点的最佳匹配**更新**为F1中的第`3`个特征点，且在最终结果`vnMathes12`中将F1中第`0`个特征点的匹配置为无效(`-1`)，**最后更新**F2中第3个特征点的**最佳距离**
-	![在这里插入图片描述](https://img-blog.csdnimg.cn/ec30ff73a74841deb36c3e33a0754fc7.png)
-### 5.旋转直方图
-统计旋转直方图，选取前三个方向，其余全部剔除，因为匹配的方向具有一致性
-![在这里插入图片描述](https://img-blog.csdnimg.cn/f8693a5caa1a4c5fa2939ffcb166c762.png)
-```cpp
-        // Step 6 筛除旋转直方图中“非主流”部分
-        if(mbCheckOrientation)
-        {
-            int ind1=-1;
-            int ind2=-1;
-            int ind3=-1;
-            // 筛选出在旋转角度差落在在直方图区间内数量最多的前三个bin的索引
-            ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
-
-            for(int i=0; i<HISTO_LENGTH; i++)
-            {
-                if(i==ind1 || i==ind2 || i==ind3)
-                    continue;
-                // 剔除掉不在前三的匹配对，因为他们不符合“主流旋转方向”    
-                for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
-                {
-                    int idx1 = rotHist[i][j];
-                    if(vnMatches12[idx1]>=0)
-                    {
-                        vnMatches12[idx1]=-1;
-                        nmatches--;
-                    }
-                }
-            }
-
-        }
-```
-### 6.更新匹配
-```cpp
-        // Step 7 将最后通过筛选的匹配好的特征点保存到vbPrevMatched
-        for(size_t i1=0, iend1=vnMatches12.size(); i1<iend1; i1++)
-            if(vnMatches12[i1]>=0)
-                vbPrevMatched[i1]=F2.mvKeysUn[vnMatches12[i1]].pt;
-```
 ## 4.Reconstruct
 在通过**单应性矩阵H**或者**基础矩阵F**进行运动恢复中，采用了**Ransac**方法来估计H或者F
 ```cpp
@@ -3352,6 +3194,15 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
 # TrackWithMotionModel
 ## 1.更新上一帧位姿
 `Tracking::UpdateLastFrame()`的主要作用是**更新上一帧的位姿**和**添加一些临时的地图点**，为什么要更新上一帧的位姿，主要是在ORB_SLAM中优化的是**参考关键帧**的位姿，对于**普通帧**，虽然在开始设置了位姿，但是没有参与优化，因此在下一次跟踪时，需要用**优化后的参考关键帧**的位姿更新上一帧的位姿
+* `mlRelativeFramePoses`存储**参考关键帧**`r`到**当前帧**`c`的位姿$T_{cr}$
+$$
+T_{cr} = T_{cw} \cdot T_{rw}^{-1}
+$$
+
+* 利用参考关键帧更新上一帧在世界坐标系下的**位姿**
+$$
+T_{lw} = T_{lr}\cdot T_{rw}
+$$
 ```cpp
     // Update pose according to reference keyframe
     // Step 1：利用参考关键帧更新上一帧在世界坐标系下的位姿
@@ -3364,17 +3215,7 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
     // Tlw = Tlr*Trw 
     mLastFrame.SetPose(Tlr * pRef->GetPose());
 ```
-* `mlRelativeFramePoses`存储**参考关键帧**`r`到**当前帧**`c`的位姿$T_{cr}$
-$$
-T_{cr} = T_{cw} \cdot T_{rw}^{-1}
-$$
-
-* 利用参考关键帧更新上一帧在世界坐标系下的**位姿**
-$$
-T_{lw} = T_{lr}\cdot T_{rw}
-$$
-
-对于**双目**或**rgbd**，为上一帧生成新的**临时地图点，主要是为了生成更多的匹配，让跟踪更好**
+对于**双目**或**RGBD**，为上一帧生成新的**临时地图点，主要是为了生成更多的匹配，让跟踪更好**
 * 临时地图点：对于**上一帧**中具有有效深度值`z>0`的特征点，如果这个**特征点**在**上一帧**中**没有**对应的地图点，或者创建后**没有被观测到**，添加为临时地图点
 * 临时地图点也不是越多越好，当满足下面两个条件停止添加：
 	* 当前的点的深度已经超过了设定的深度阈值(**35倍基线**)，主要太远了不可靠
@@ -3615,387 +3456,10 @@ $$
 $$
 T_{cw} = T_{cl}\cdot T_{lw}
 $$
-然后，基于**投影的匹配搜索**`SearchByProjection`获得上一帧与当前帧的匹配关系，其步骤：
-* 构建旋转直方图，用于检测旋转一致性
-```cpp
-        // Rotation Histogram (to check rotation consistency)
-        // Step 1 建立旋转直方图，用于检测旋转一致性
-        vector<int> rotHist[HISTO_LENGTH];
-        for(int i=0;i<HISTO_LENGTH;i++)
-            rotHist[i].reserve(500);
-
-        //! 原作者代码是 const float factor = 1.0f/HISTO_LENGTH; 是错误的，更改为下面代码
-        // const float factor = HISTO_LENGTH/360.0f;
-        const float factor = 1.0f/HISTO_LENGTH;
-```
-* 计算当前帧和前一帧的平移$t_{lc}$，判断相机是前进还是后退（近大远小）（尺度越大，图像越小）
-	* 前进：$z > b$，物体在当前帧的图像上**变大**，因此对于上一帧的特征点，需要在当前帧**更高**的尺度上搜索
-	* 后退：$z < -b$，物体在当前帧的图像上**变小**，因此对于上一帧的特征点，需要在当前帧**更低**的尺度上搜索
-```cpp
-        // Step 2 计算当前帧和前一帧的平移向量
-        //当前帧的相机位姿
-        const Sophus::SE3f Tcw = CurrentFrame.GetPose();
-        const Eigen::Vector3f twc = Tcw.inverse().translation();
-
-        const Sophus::SE3f Tlw = LastFrame.GetPose();
-        const Eigen::Vector3f tlc = Tlw * twc; 
-
-        // 判断前进还是后退
-        const bool bForward = tlc(2)>CurrentFrame.mb && !bMono;     // 非单目情况，如果Z大于基线，则表示相机明显前进
-        const bool bBackward = -tlc(2)>CurrentFrame.mb && !bMono;   // 非单目情况，如果-Z小于基线，则表示相机明显后退
-```
-* 对于前一帧的每一个地图点，通过相机投影模型，投影到当前帧
-```cpp
-         // 对上一帧有效的MapPoints投影到当前帧坐标系
-         Eigen::Vector3f x3Dw = pMP->GetWorldPos();
-         Eigen::Vector3f x3Dc = Tcw * x3Dw;
-
-         const float xc = x3Dc(0);
-         const float yc = x3Dc(1);
-         const float invzc = 1.0/x3Dc(2);
-
-         if(invzc<0)
-             continue;
-
-         // 投影到当前帧中
-         Eigen::Vector2f uv = CurrentFrame.mpCamera->project(x3Dc);
-```
-![在这里插入图片描述](https://img-blog.csdnimg.cn/10bf7c4ba9c44055a9accc0e6fb45565.png)
-* 根据相机的前进后退方向来判断搜索尺度范围
-	* 前进：$z > b$，物体在当前帧的图像上**变大**，因此对于上一帧的特征点，需要在当前帧**更高**的尺度上搜索
-	* 后退：$z < -b$，物体在当前帧的图像上**变小**，因此对于上一帧的特征点，需要在当前帧**更低**的尺度上搜索
-	![在这里插入图片描述](https://img-blog.csdnimg.cn/be2af519b6c449a09446d30c3385d268.png)
-
-
-```cpp
-        // 认为投影前后地图点的尺度信息不变
-        int nLastOctave = (LastFrame.Nleft == -1 || i < LastFrame.Nleft) ? LastFrame.mvKeys[i].octave
-                                                                        : LastFrame.mvKeysRight[i - LastFrame.Nleft].octave;
-
-        // Search in a window. Size depends on scale
-        // 单目：th = 7，双目：th = 15
-        float radius = th*CurrentFrame.mvScaleFactors[nLastOctave]; // 尺度越大，搜索范围越大
-
-        // 记录候选匹配点的id
-        vector<size_t> vIndices2;
-
-        // Step 4 根据相机的前后前进方向来判断搜索尺度范围。
-        // 以下可以这么理解，例如一个有一定面积的圆点，在某个尺度n下它是一个特征点
-        // 当相机前进时，圆点的面积增大，在某个尺度m下它是一个特征点，由于面积增大，则需要在更高的尺度下才能检测出来
-        // 当相机后退时，圆点的面积减小，在某个尺度m下它是一个特征点，由于面积减小，则需要在更低的尺度下才能检测出来
-        if(bForward)  // 前进,则上一帧兴趣点在所在的尺度nLastOctave<=nCurOctave
-            vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, nLastOctave);
-        else if(bBackward)  // 后退,则上一帧兴趣点在所在的尺度0<=nCurOctave<=nLastOctave
-            vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, 0, nLastOctave);
-        else  // 在[nLastOctave-1, nLastOctave+1]中搜索
-            vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, nLastOctave-1, nLastOctave+1);
-
-        if(vIndices2.empty())
-            continue;
-```
-* 遍历候选匹配点，寻找距离最小的最佳匹配点
-	* 这里就简单选了个最佳匹配点，其他的像剔除重复匹配，最佳和次佳比都没做
-```cpp
-                    const cv::Mat dMP = pMP->GetDescriptor();
-
-                    int bestDist = 256;
-                    int bestIdx2 = -1;
-
-                    // Step 5 遍历候选匹配点，寻找距离最小的最佳匹配点 
-                    for(vector<size_t>::const_iterator vit=vIndices2.begin(), vend=vIndices2.end(); vit!=vend; vit++)
-                    {
-                        const size_t i2 = *vit;
-
-                        // 如果该特征点已经有对应的MapPoint了,则退出该次循环
-                        if(CurrentFrame.mvpMapPoints[i2])
-                            if(CurrentFrame.mvpMapPoints[i2]->Observations()>0)
-                                continue;
-
-                        if(CurrentFrame.Nleft == -1 && CurrentFrame.mvuRight[i2]>0)
-                        {
-                            // 双目和rgbd的情况，需要保证右图的点也在搜索半径以内
-                            const float ur = uv(0) - CurrentFrame.mbf*invzc;
-                            const float er = fabs(ur - CurrentFrame.mvuRight[i2]);
-                            if(er>radius)
-                                continue;
-                        }
-
-                        const cv::Mat &d = CurrentFrame.mDescriptors.row(i2);
-
-                        const int dist = DescriptorDistance(dMP,d);
-
-                        if(dist<bestDist)
-                        {
-                            bestDist=dist;
-                            bestIdx2=i2;
-                        }
-                    }
-```
-* 计算匹配点对的**旋转角度差**所在的直方图
-```cpp
-                    // 最佳匹配距离要小于设定阈值
-                    if(bestDist<=TH_HIGH)
-                    {
-                        CurrentFrame.mvpMapPoints[bestIdx2]=pMP;
-                        nmatches++;
-
-                        // Step 6 计算匹配点旋转角度差所在的直方图
-                        if(mbCheckOrientation)
-                        {
-                            cv::KeyPoint kpLF = (LastFrame.Nleft == -1) ? LastFrame.mvKeysUn[i]
-                                                                        : (i < LastFrame.Nleft) ? LastFrame.mvKeys[i]
-                                                                                                : LastFrame.mvKeysRight[i - LastFrame.Nleft];
-
-                            cv::KeyPoint kpCF = (CurrentFrame.Nleft == -1) ? CurrentFrame.mvKeysUn[bestIdx2]
-                                                                        : (bestIdx2 < CurrentFrame.Nleft) ? CurrentFrame.mvKeys[bestIdx2]
-                                                                                                            : CurrentFrame.mvKeysRight[bestIdx2 - CurrentFrame.Nleft];
-                            float rot = kpLF.angle-kpCF.angle;
-                            if(rot<0.0)
-                                rot+=360.0f;
-                            int bin = round(rot*factor);
-                            if(bin==HISTO_LENGTH)
-                                bin=0;
-                            assert(bin>=0 && bin<HISTO_LENGTH);
-                            rotHist[bin].push_back(bestIdx2);
-                        }
-                    }
-```
-* 进行旋转一致检测，剔除不一致的匹配
-![在这里插入图片描述](https://img-blog.csdnimg.cn/69ca90e110524f1689d938135b2aeeb9.png)
-```cpp
-        //Apply rotation consistency
-        //  Step 7 进行旋转一致检测，剔除不一致的匹配
-        if(mbCheckOrientation)
-        {
-            int ind1=-1;
-            int ind2=-1;
-            int ind3=-1;
-
-            ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
-
-            for(int i=0; i<HISTO_LENGTH; i++)
-            {
-                // 对于数量不是前3个的点对，剔除
-                if(i!=ind1 && i!=ind2 && i!=ind3)
-                {
-                    for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
-                    {
-                        CurrentFrame.mvpMapPoints[rotHist[i][j]]=static_cast<MapPoint*>(NULL);
-                        nmatches--;
-                    }
-                }
-            }
-        }
-```
-
+然后，基于**投影的匹配搜索**[SearchByProjection](##SearchByProjection(TrackWithMotionModel))获得上一帧与当前帧的匹配关系
 
 ## 3.优化
-得到上一帧与当前帧的匹配关系后，利用`3D-2D`投影关系优化当前帧位姿`PoseOptimization`
-### PoseOptimization
-`PoseOptimization`主要的作用是利用**重投影**优化**单帧的位姿**，主要用在`Tracking`的几种跟踪模式`TrackWithMotionModel`、`TrackReferenceKeyFrame`、 `TrackLocalMap`、`Relocalization`中
-![](https://img-blog.csdnimg.cn/42ae5eb09cab453abc35493835d222f3.png)
-
-##### 输入  
-|  优化变量        |              |  观测            |
-|:-------------|:-------------|:---------------|
-| 帧的Pose       | 帧的MapPoint   | 帧的KeyPoint     |     
-##### 初始化  
-```cpp  
-	//创建优化器  
-    g2o::SparseOptimizer optimizer;  
-    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
-
-	//创建线性求解器
-    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
-	//创建块求解器 6 位姿 3 地图点
-    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
-
-	//设置优化算法
-    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
-    optimizer.setAlgorithm(solver);
-```
-##### 设置vertex
-* VertexSE3Expmap
-	* 设置**估计值**：$T_{cw}$
-	* 设置Id
-	* 是否固定：**False**
-```cpp
-    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
-    Sophus::SE3<float> Tcw = pFrame->GetPose();
-    //需要将Tcw转换为SE3Quat
-    vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
-    vSE3->setId(0);
-    vSE3->setFixed(false);
-    optimizer.addVertex(vSE3);
-```
-##### VertexSE3Expmap
-| 优化变量     | 类型        | 维度 |
-|:---------|:----------|:---|
-| $T_{cw}$ | `SE3Quat` |  6 |  
-* `VertexSE3Expmap`：SE3类型顶点在内部用变换矩阵参数化，在外部用指数映射参数化
-* `SE3Quat`用**四元数**表示旋转，在更新时将**6维的前3维**通过李群李代数进行指数映射为旋转矩阵，然后再转换为四元数，内部操作采用四元数
-* 更新：
-$$
- \tilde{T}_{cw} = \mathbf{Exp}{\delta\vec{\phi}}\cdot T_{cw}
-$$
-```cpp
-// 6维，类型SE3Quat
-class  VertexSE3Expmap : public BaseVertex<6, SE3Quat>{  
-public:  
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW  
-  
-  VertexSE3Expmap();  
-  
-  bool read(std::istream& is);  
-  
-  bool write(std::ostream& os) const;  
-  
-  virtual void setToOriginImpl() {  
-    _estimate = SE3Quat();  
-  }  
-  
-  virtual void oplusImpl(const double* update_)  { 
-	  //获得delta 
-    Eigen::Map<const Vector6d> update(update_);  
-    // 更新，指数映射，设置估计值
-    setEstimate(SE3Quat::exp(update)*estimate());  
-  }  
-};
-```
-##### 设置edge
-对于每一对**地图点-特征点**添加重投影残差边：
-* [EdgeSE3ProjectXYZOnlyPose](ORB_SLAM3_G2oType.md#EdgeSE3ProjectXYZOnlyPose)
-	* 设置vertex：`g2o::VertexSE3Expmap`
-	* 设置观测**obs**：`keyPoint`
-	* 设置**信息矩阵**
-	* 设置**鲁棒核函数**：huber核
-	* 设置huber核的的δ
-	* 设置**相机内参**
-	* 设置**地图点**
-```cpp
-	Eigen::Matrix<double,2,1> obs;  
-	const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];  
-	obs << kpUn.pt.x, kpUn.pt.y;
-
-	// 新建节点，只优化位姿  
-   ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose* e = new ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose();
-
-	//设置vertex和观测
-   e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));  
-   e->setMeasurement(obs);  
-
-	//设置信息矩阵
-	const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];  
-	e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
-
-	//设置huber核函数
-	g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;  
-	e->setRobustKernel(rk);  
-	rk->setDelta(deltaMono);
-
-	//设置相机内参
-	e->pCamera = pFrame->mpCamera;  
-	//设置地图点
-	cv::Mat Xw = pMP->GetWorldPos();  
-	e->Xw[0] = Xw.at<float>(0);  
-	e->Xw[1] = Xw.at<float>(1);  
-	e->Xw[2] = Xw.at<float>(2);
-  
-   optimizer.addEdge(e);
-```
-##### EdgeSE3ProjectXYZOnlyPose
-* 属性：**一元边**
-* 观测：$p=\left(u,v\right)$
-* 优化变量：$T_{cw}$
-* 残差：$err = p-\pi \left(T_{cw} \cdot P_{w}\right)$
-
-```cpp
-// 2 观测的维度
-// Eigen::Vector2d 观测的类型
-// g2o::VertexSE3Expmap vertex的类型
-class  EdgeSE3ProjectXYZOnlyPose: public  g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap>{  
-public:  
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW  
-  
-    EdgeSE3ProjectXYZOnlyPose(){}  
-  
-    bool read(std::istream& is);  
-  
-    bool write(std::ostream& os) const;  
-  
-    void computeError()  {  
-	    //获取顶点
-        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
-        //获取观测
-        Eigen::Vector2d obs(_measurement);  
-        //计算残差
-        _error = obs-pCamera->project(v1->estimate().map(Xw));  
-    }  
-  
-    bool isDepthPositive() {  
-        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
-        return (v1->estimate().map(Xw))(2)>0.0;  
-    }  
-  
-  
-    virtual void linearizeOplus();  
-  
-    Eigen::Vector3d Xw;  //地图点
-    GeometricCamera* pCamera;  //相机模型
-};
-```
-
-* jacobian
-$$
-\frac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}_{C}} \frac{\partial \boldsymbol{P}_{C}}{\partial \delta \boldsymbol{\xi}}
-$$
-其中：
-$$
-\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}^{C}}=-\left(\begin{array}{lll}
-\frac{\partial u_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Z^{C}} \\
-\frac{\partial v_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Z^{C}}
-\end{array}\right)=-\left(\begin{array}{ccc}
-\frac{f_{z}}{Z^{C}} & 0 & -\frac{f_{x} X^{C}}{\left(Z^{C}\right)^{2}} \\
-0 & \frac{f_{y}}{Z^{C}} & -\frac{f_{y} Y^{C}}{\left(Z^{C}\right)^{2}}
-\end{array}\right)
-$$
-
-$$
-\frac{\partial \boldsymbol{P}^{C}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)}{\partial \delta \boldsymbol{\xi}}=\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)^{\odot}
-=\begin{bmatrix}
- I &\left(\boldsymbol{P}^{W}\right)^{\wedge}
-\end{bmatrix}
-$$
-```cpp
-void EdgeSE3ProjectXYZOnlyPose::linearizeOplus() {  
-    g2o::VertexSE3Expmap * vi = static_cast<g2o::VertexSE3Expmap *>(_vertices[0]);  
-    Eigen::Vector3d xyz_trans = vi->estimate().map(Xw);  
-  
-    double x = xyz_trans[0];  
-    double y = xyz_trans[1];  
-    double z = xyz_trans[2];  
-  
-    Eigen::Matrix<double,3,6> SE3deriv;  
-    SE3deriv << 0.f, z,   -y, 1.f, 0.f, 0.f,  
-                 -z , 0.f, x, 0.f, 1.f, 0.f,  
-                 y ,  -x , 0.f, 0.f, 0.f, 1.f;  
-  
-    _jacobianOplusXi = -pCamera->projectJac(xyz_trans) * SE3deriv;  
-}
-```
-##### 优化策略
-* 分4次优化，每次迭代10次
-* 每次优化，评估每条重投影边的残差
-	* 如果大于阈值，设置为`level = 1`，不再参与优化
-	* 如果小于阈值，设置为`level = 0`
-* 从第**3**次开始，不再使用鲁棒核函数`e->setRobustKernel(0)`
-##### 恢复
-```cpp
-g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));  
-g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();  
-cv::Mat pose = Converter::toCvMat(SE3quat_recov);  
-pFrame->SetPose(pose);
-```
+得到上一帧与当前帧的匹配关系后，利用`3D-2D`投影关系优化当前帧位姿[PoseOptimization](##PoseOptimization)
 ## 4.剔除当前帧中地图点中的外点
 ```cpp
     int nmatchesMap = 0;
@@ -4097,254 +3561,29 @@ void TemplatedVocabulary<TDescriptor,F>::transform(const TDescriptor &feature,
   weight = m_nodes[final_id].weight;
 }
 ```
-## 2.通过SearchByBoW加速当前帧与参考帧之间的特征匹配
-1. 构造旋转直方图
-```cpp
-        // 特征点角度旋转差统计用的直方图
-        vector<int> rotHist[HISTO_LENGTH];
-        for(int i=0;i<HISTO_LENGTH;i++)
-            rotHist[i].reserve(500);
+## 2.特征匹配
 
-        // 将0~360的数转换到0~HISTO_LENGTH的系数
-        //! 原作者代码是 const float factor = 1.0f/HISTO_LENGTH; 是错误的，更改为下面代码  
-        // const float factor = HISTO_LENGTH/360.0f;
-        const float factor = 1.0f/HISTO_LENGTH;
-```
-2. 对于`pKF`与`F`的`FeatureVector `，对属于**同一节点**的ORB特征进行匹配
-
-为什么用`FeatureVector`能加快搜索？从词汇树中可以看出，`Node`相对于`Word`为更加抽象的簇，一个`Node`下包含了许多的**相似的**`Word`。如果想比较两个东西，那么先用**抽象特征**进行粗筛，然后再**逐步到**具体的特征。两帧图像特征匹配类似，先对比`FeatureVector`中的`Node`，如果`Node`为同一节点，再用节点下`features`进行匹配，这样避免了所有特征点之间的两两匹配
-```cpp
-        // 取出关键帧的词袋特征向量
-        const DBoW2::FeatureVector &vFeatVecKF = pKF->mFeatVec;
-        // We perform the matching over ORB that belong to the same vocabulary node (at a certain level)
-        // 将属于同一节点的ORB特征进行匹配
-        DBoW2::FeatureVector::const_iterator KFit = vFeatVecKF.begin();
-        DBoW2::FeatureVector::const_iterator Fit = F.mFeatVec.begin();
-        DBoW2::FeatureVector::const_iterator KFend = vFeatVecKF.end();
-        DBoW2::FeatureVector::const_iterator Fend = F.mFeatVec.end();
-
-        while(KFit != KFend && Fit != Fend)
-        {
-            // Step 1：分别取出属于同一node的ORB特征点
-            if(KFit->first == Fit->first) 
-            {
-            	...
-                KFit++;
-                Fit++;
-            }
-            else if(KFit->first < Fit->first)
-            {
-                // 对齐
-                KFit = vFeatVecKF.lower_bound(Fit->first);
-            }
-            else
-            {
-                // 对齐
-                Fit = F.mFeatVec.lower_bound(KFit->first);
-            }
-        }
-```
-3. 对同一node，用`KF`中**地图点对应的ORB特征点**与`F`中的**ORB特征点**两两匹配，其条件：
-	* 不能重复匹配`vpMapPointMatches`：如果`vpMapPointMatches[realIdxF]`非`NULL`，说明已有匹配了，则不能再匹配
-	* 最佳匹配距离小于阈值`TH_LOW`
-	* 最佳匹配距离与次佳匹配距离的比值小于阈值`mfNNratio`
-```cpp
-                // second 是该node内存储的feature index
-                const vector<unsigned int> vIndicesKF = KFit->second;
-                const vector<unsigned int> vIndicesF = Fit->second;
-
-                // Step 2：遍历KF中属于该node的特征点
-                for(size_t iKF=0; iKF<vIndicesKF.size(); iKF++)
-                {
-                    // 关键帧该节点中特征点的索引
-                    const unsigned int realIdxKF = vIndicesKF[iKF];
-
-                    // 取出KF中该特征对应的地图点
-                    MapPoint* pMP = vpMapPointsKF[realIdxKF];
-
-                    if(!pMP)
-                        continue;
-
-                    if(pMP->isBad())
-                        continue;
-                    // 取出关键帧KF中该特征对应的描述子
-                    const cv::Mat &dKF= pKF->mDescriptors.row(realIdxKF); 
-
-                    int bestDist1=256; // 最好的距离（最小距离）
-                    int bestIdxF =-1 ;
-                    int bestDist2=256; // 次好距离（倒数第二小距离）
-
-                    int bestDist1R=256;
-                    int bestIdxFR =-1 ;
-                    int bestDist2R=256;
-                    // Step 3：遍历F中属于该node的特征点，寻找最佳匹配点
-                    for(size_t iF=0; iF<vIndicesF.size(); iF++)
-                    {
-                        if(F.Nleft == -1){
-                            // 这里的realIdxF是指普通帧该节点中特征点的索引
-                            const unsigned int realIdxF = vIndicesF[iF];
-
-                            // 如果地图点存在，说明这个点已经被匹配过了，不再匹配，加快速度
-                            if(vpMapPointMatches[realIdxF])
-                                continue;
-                            // 取出普通帧F中该特征对应的描述子
-                            const cv::Mat &dF = F.mDescriptors.row(realIdxF);
-                            // 计算描述子的距离
-                            const int dist =  DescriptorDistance(dKF,dF);
-
-                            // 遍历，记录最佳距离、最佳距离对应的索引、次佳距离等
-                            // 如果 dist < bestDist1 < bestDist2，更新bestDist1 bestDist2
-                            if(dist<bestDist1)
-                            {
-                                bestDist2=bestDist1;
-                                bestDist1=dist;
-                                bestIdxF=realIdxF;
-                            }
-                            // 如果bestDist1 < dist < bestDist2，更新bestDist2
-                            else if(dist<bestDist2)
-                            {
-                                bestDist2=dist;
-                            }
-                        }
-                        else{
-                            const unsigned int realIdxF = vIndicesF[iF];
-
-                            if(vpMapPointMatches[realIdxF])
-                                continue;
-
-                            const cv::Mat &dF = F.mDescriptors.row(realIdxF);
-
-                            const int dist =  DescriptorDistance(dKF,dF);
-
-                            if(realIdxF < F.Nleft && dist<bestDist1){
-                                bestDist2=bestDist1;
-                                bestDist1=dist;
-                                bestIdxF=realIdxF;
-                            }
-                            else if(realIdxF < F.Nleft && dist<bestDist2){
-                                bestDist2=dist;
-                            }
-
-                            if(realIdxF >= F.Nleft && dist<bestDist1R){
-                                bestDist2R=bestDist1R;
-                                bestDist1R=dist;
-                                bestIdxFR=realIdxF;
-                            }
-                            else if(realIdxF >= F.Nleft && dist<bestDist2R){
-                                bestDist2R=dist;
-                            }
-                        }
-
-                    }
-                    // Step 4：根据阈值 和 角度投票剔除误匹配
-                    // Step 4.1：第一关筛选：匹配距离必须小于设定阈值
-                    if(bestDist1<=TH_LOW)
-                    {
-                        // Step 4.2：第二关筛选：最佳匹配比次佳匹配明显要好，那么最佳匹配才真正靠谱
-                        if(static_cast<float>(bestDist1)<mfNNratio*static_cast<float>(bestDist2))
-                        {
-                            // Step 4.3：记录成功匹配特征点的对应的地图点(来自关键帧)
-                            vpMapPointMatches[bestIdxF]=pMP;
-
-                            // 这里的realIdxKF是当前遍历到的关键帧的特征点id
-                            const cv::KeyPoint &kp =
-                                    (!pKF->mpCamera2) ? pKF->mvKeysUn[realIdxKF] :
-                                    (realIdxKF >= pKF -> NLeft) ? pKF -> mvKeysRight[realIdxKF - pKF -> NLeft]
-                                                                : pKF -> mvKeys[realIdxKF];
-                            // Step 4.4：计算匹配点旋转角度差所在的直方图
-                            if(mbCheckOrientation)
-                            {
-                                cv::KeyPoint &Fkp =
-                                        (!pKF->mpCamera2 || F.Nleft == -1) ? F.mvKeys[bestIdxF] :
-                                        (bestIdxF >= F.Nleft) ? F.mvKeysRight[bestIdxF - F.Nleft]
-                                                            : F.mvKeys[bestIdxF];
-                                // 所有的特征点的角度变化应该是一致的，通过直方图统计得到最准确的角度变化值
-                                float rot = kp.angle-Fkp.angle;
-                                if(rot<0.0)
-                                    rot+=360.0f;
-                                int bin = round(rot*factor);// 将rot分配到bin组, 四舍五入, 其实就是离散到对应的直方图组中
-                                if(bin==HISTO_LENGTH)
-                                    bin=0;
-                                assert(bin>=0 && bin<HISTO_LENGTH);
-                                rotHist[bin].push_back(bestIdxF);
-                            }
-                            nmatches++;
-                        }
-
-                        if(bestDist1R<=TH_LOW)
-                        {
-                            if(static_cast<float>(bestDist1R)<mfNNratio*static_cast<float>(bestDist2R) || true)
-                            {
-                                vpMapPointMatches[bestIdxFR]=pMP;
-
-                                const cv::KeyPoint &kp =
-                                        (!pKF->mpCamera2) ? pKF->mvKeysUn[realIdxKF] :
-                                        (realIdxKF >= pKF -> NLeft) ? pKF -> mvKeysRight[realIdxKF - pKF -> NLeft]
-                                                                    : pKF -> mvKeys[realIdxKF];
-
-                                if(mbCheckOrientation)
-                                {
-                                    cv::KeyPoint &Fkp =
-                                            (!F.mpCamera2) ? F.mvKeys[bestIdxFR] :
-                                            (bestIdxFR >= F.Nleft) ? F.mvKeysRight[bestIdxFR - F.Nleft]
-                                                                : F.mvKeys[bestIdxFR];
-
-                                    float rot = kp.angle-Fkp.angle;
-                                    if(rot<0.0)
-                                        rot+=360.0f;
-                                    int bin = round(rot*factor);
-                                    if(bin==HISTO_LENGTH)
-                                        bin=0;
-                                    assert(bin>=0 && bin<HISTO_LENGTH);
-                                    rotHist[bin].push_back(bestIdxFR);
-                                }
-                                nmatches++;
-                            }
-                        }
-                    }
-
-                }
-```
-4. 旋转一致检测，剔除不一致的匹配
-![在这里插入图片描述](https://img-blog.csdnimg.cn/5cfbe40185ea47d895fd84f63f7abbbe.png)
+通过[SearchByBoW](##SearchByBow(Tracking))加速**当前帧**与**参考帧**之间的特征匹配
 
 ```cpp
-        // Step 5 根据方向剔除误匹配的点
-        if(mbCheckOrientation)
-        {
-            // index
-            int ind1=-1;
-            int ind2=-1;
-            int ind3=-1;
+    ORBmatcher matcher(0.7,true);
+    vector<MapPoint*> vpMapPointMatches;
 
-            // 筛选出在旋转角度差落在在直方图区间内数量最多的前三个bin的索引
-            ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
-
-            for(int i=0; i<HISTO_LENGTH; i++)
-            {
-                // 如果特征点的旋转角度变化量属于这三个组，则保留
-                if(i==ind1 || i==ind2 || i==ind3)
-                    continue;
-
-                // 剔除掉不在前三的匹配对，因为他们不符合“主流旋转方向”  
-                for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
-                {
-                    vpMapPointMatches[rotHist[i][j]]=static_cast<MapPoint*>(NULL);
-                    nmatches--;
-                }
-            }
-        }
+    int nmatches = matcher.SearchByBoW(mpReferenceKF,mCurrentFrame,vpMapPointMatches);
 ```
+
 ## 3.将上一帧的位姿作为当前帧的位姿的初值
 ```cpp
     mCurrentFrame.mvpMapPoints = vpMapPointMatches;
     mCurrentFrame.SetPose(mLastFrame.GetPose());  
 ```
-## 4.通过最小化重投影误差优化当前帧位姿
+## 4.优化
+
+通过[PoseOptimization](##PoseOptimization)最小化重投影误差优化当前帧位姿
+
 ```cpp
 Optimizer::PoseOptimization(&mCurrentFrame);
 ```
-参考**ORB_SLAM3 TrackWithMotionModel**中的[PoseOptimization](https://blog.csdn.net/He3he3he/article/details/131649821)
 ## 5.剔除优化后匹配中的外点
 ```cpp
     int nmatchesMap = 0;
@@ -4375,7 +3614,7 @@ Optimizer::PoseOptimization(&mCurrentFrame);
     }
 ```
 # TrackLocalMap
-通过[TrackWithMotionModel](https://blog.csdn.net/He3he3he/article/details/131649821)或[TrackReferenceKeyFrame](https://blog.csdn.net/He3he3he/article/details/132000817)的`Frame to Frame`跟踪得到了**当前帧的初始位姿**。为了得到更加精准的位姿，可以将**局部地图**投影到当前帧上得到更多的匹配实现`Frame to Map`，然后进一步优化当前帧的位姿
+通过[TrackWithMotionModel](#TrackWithMotionModel)或[TrackReferenceKeyFrame](#TrackReferenceKeyFrame)的`Frame to Frame`跟踪得到了**当前帧的初始位姿**。为了得到更加精准的位姿，可以将**局部地图**投影到当前帧上得到更多的匹配实现`Frame to Map`，然后进一步优化当前帧的位姿
 ## 1.UpdateLocalMap
 `TrackLocalMap`的第一步就是更新当前帧的**局部地图**，该地图包含：
 *	通过`UpdateLocalKeyFrames`更新**局部关键帧**：
@@ -4817,7 +4056,8 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
 }
 ```
 
-3  当前帧视野范围内的地图点投影到当前帧，得到更多的匹配
+3  当前帧视野范围内的地图点投影到当前帧，通过[SearchByProjection](##SearchByProjection(TrackLocalMap))得到更多的匹配
+
 ```cpp
     if(nToMatch>0)
     {
@@ -4848,9 +4088,760 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
         int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
     }
 ```
-### SearchByProjection
-`SearchByProjection`通过将局部地图中在当前帧视野范围内的地图点投影到当前帧寻找更多的匹配关系：
-1. 对当前帧视野范围内的地图点`mbTrackInView = true`进行投影
+## 3.优化
+优化分为两种情况：
+* IMU未初始化 或者 刚刚重定位：[PoseOptimization](##PoseOptimization)
+* 其他情况：[PoseInertialOptimizationLastFrame](##PoseInertialOptimizationLastFrame)或者`PoseInertialOptimizationLastKeyFrame`
+```cpp
+    // Step 3：前面新增了更多的匹配关系，BA优化得到更准确的位姿
+    int inliers;
+    // IMU未初始化，仅优化位姿
+    if (!mpAtlas->isImuInitialized())
+        Optimizer::PoseOptimization(&mCurrentFrame);
+    else
+    {
+        // 初始化，重定位，重新开启一个地图都会使mnLastRelocFrameId变化
+        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
+        {
+            Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
+            Optimizer::PoseOptimization(&mCurrentFrame);
+        }
+        else  // 如果积累的IMU数据量比较多，考虑使用IMU数据优化
+        {
+            // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
+            // mbMapUpdated变化见Tracking::PredictStateIMU()
+            // 未更新地图
+            if(!mbMapUpdated) //  && (mnMatchesInliers>30))
+            {
+                Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
+                // 使用上一普通帧以及当前帧的视觉信息和IMU信息联合优化当前帧位姿、速度和IMU零偏
+                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+            }
+            else
+            {
+                Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
+                // 使用上一关键帧以及当前帧的视觉信息和IMU信息联合优化当前帧位姿、速度和IMU零偏
+                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+            }
+        }
+    }
+```
+## 4.更新当前帧地图点实际被观测到次数
+```cpp
+    for(int i=0; i<mCurrentFrame.N; i++)
+    {
+        if(mCurrentFrame.mvpMapPoints[i])
+        {
+            //如果该地图点不为外点
+            if(!mCurrentFrame.mvbOutlier[i])
+            {
+                // 真正找到该点的帧数mnFound 加 1
+                mCurrentFrame.mvpMapPoints[i]->IncreaseFound();
+                // 查看当前是否是在纯定位过程
+                if(!mbOnlyTracking)
+                {
+                    // 如果该地图点被相机观测数目nObs大于0，匹配内点计数+1
+                    // nObs： 被观测到的相机数目，单目+1，双目或RGB-D则+2
+                    if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+                        mnMatchesInliers++;
+                }
+                else
+                    // 记录当前帧跟踪到的地图点数目，用于统计跟踪效果
+                    mnMatchesInliers++;
+            }
+            // 如果这个地图点是外点,并且当前相机输入还是双目的时候,就删除这个点
+            // 原因分析：因为双目本身可以左右互匹配，删掉无所谓
+            else if(mSensor==System::STEREO)
+                mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+        }
+    }
+```
+## 5.判断跟踪是否成功
+```cpp
+    // Decide if the tracking was succesful
+    // More restrictive if there was a relocalization recently
+    mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
+    // Step 5：根据跟踪匹配数目及重定位情况决定是否跟踪成功
+    // 如果最近刚刚发生了重定位,那么至少成功匹配50个点才认为是成功跟踪
+    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
+        return false;
+
+    // RECENTLY_LOST状态下，至少成功跟踪10个才算成功
+    if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
+        return true;
+
+    // 单目IMU模式下做完初始化至少成功跟踪15个才算成功，没做初始化需要50个
+    if (mSensor == System::IMU_MONOCULAR)
+    {
+        if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
+        {
+            return false;
+        }
+        else
+            return true;
+    }
+    else if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+    {
+        if(mnMatchesInliers<15)
+        {
+            return false;
+        }
+        else
+            return true;
+    }
+    else
+    {
+        //以上情况都不满足，只要跟踪的地图点大于30个就认为成功了
+        if(mnMatchesInliers<30)
+            return false;
+        else
+            return true;
+    }
+```
+# Relocalization
+`Relocalization`主要的作用是在**跟踪失败**时，通过词袋在关键帧数据库`KeyFrameDatabase`中寻找和当前帧相似的关键帧作为匹配帧，进而恢复当前帧的位姿
+
+1. 计算当前帧的`Bow`，参考[ORB_SLAM3 TrackReferenceKeyFrame中计算当前帧的描述子的Bow向量](https://blog.csdn.net/He3he3he/article/details/132000817?spm=1001.2014.3001.5502)
+```cpp
+mCurrentFrame.ComputeBoW();
+```
+2. 检测当前帧的重定位候选帧`vpCandidateKFs`
+```cpp
+vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
+```
+3. 对于所有的候选关键帧，通过[SearchByBoW](##)搜索与当前帧的匹配，并初始化对应的`MLPnPsolver`
+```cpp
+    const int nKFs = vpCandidateKFs.size();
+
+    // We perform first an ORB matching with each candidate
+    // If enough matches are found we setup a PnP solver
+    ORBmatcher matcher(0.75,true);
+
+    // 每个关键帧的解算器
+    vector<MLPnPsolver*> vpMLPnPsolvers;
+    vpMLPnPsolvers.resize(nKFs);
+
+    // 每个关键帧和当前帧中特征点的匹配关系
+    vector<vector<MapPoint*> > vvpMapPointMatches;
+    vvpMapPointMatches.resize(nKFs);
+
+    // 放弃某个关键帧的标记
+    vector<bool> vbDiscarded;
+    vbDiscarded.resize(nKFs);
+
+    // 有效的候选关键帧数目
+    int nCandidates=0;
+
+    // Step 3：遍历所有的候选关键帧，通过BoW进行快速匹配，用匹配结果初始化PnP Solver
+    for(int i=0; i<nKFs; i++)
+    {
+        KeyFrame* pKF = vpCandidateKFs[i];
+        if(pKF->isBad())
+            vbDiscarded[i] = true;
+        else
+        {
+            // 当前帧和候选关键帧用BoW进行快速匹配，匹配结果记录在vvpMapPointMatches，nmatches表示匹配的数目
+            int nmatches = matcher.SearchByBoW(pKF,mCurrentFrame,vvpMapPointMatches[i]);
+            // 如果和当前帧的匹配数小于15,那么只能放弃这个关键帧
+            if(nmatches<15)
+            {
+                vbDiscarded[i] = true;
+                continue;
+            }
+            else
+            {
+                // 如果匹配数目够用，用匹配结果初始化MLPnPsolver
+                // ? 为什么用MLPnP? 因为考虑了鱼眼相机模型，解耦某些关系？
+                // 参考论文《MLPNP-A REAL-TIME MAXIMUM LIKELIHOOD SOLUTION TO THE PERSPECTIVE-N-POINT PROBLEM》
+                MLPnPsolver* pSolver = new MLPnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
+                // 构造函数调用了一遍，这里重新设置参数
+                pSolver->SetRansacParameters(
+                    0.99,                    // 模型最大概率值，默认0.9
+                    10,                      // 内点的最小阈值，默认8
+                    300,                     // 最大迭代次数，默认300
+                    6,                       // 最小集，每次采样六个点，即最小集应该设置为6，论文里面写着I > 5
+                    0.5,                     // 理论最少内点个数，这里是按照总数的比例计算，所以epsilon是比例，默认是0.4
+                    5.991);                  // 卡方检验阈值 //This solver needs at least 6 points
+                vpMLPnPsolvers[i] = pSolver;
+                nCandidates++;  // 1.0版本新加的
+            }
+        }
+    }
+```
+4. 从候选关键帧中找到能够匹配上的关键帧，当位姿优化`PoseOptimization`的内点数到达`50`则成功
+![在这里插入图片描述](https://img-blog.csdnimg.cn/0c89abd32e104e9f99435694cc58f06f.png)
+
+PnP+Opt：
+* 通过`MLPnPsolver`计算**当前帧**的位姿`eigTcw`，并设置当前帧位姿的初值
+* 根据`PnP`的内外点`vbInliers`更新下当前帧的地图点，然后用`PoseOptimization`优化当前帧的Pose
+* 根据优化后的内外点`mCurrentFrame.mvbOutlier`更新当前帧的地图点
+* 如果内点太少`10`，直接跳过；如果内点大于`50`，匹配成功；如果内点在`[10, 50]`之间，可以再尝试下
+```cpp
+            vector<bool> vbInliers;
+            int nInliers;
+            bool bNoMore;
+			//PnP
+            MLPnPsolver* pSolver = vpMLPnPsolvers[i];
+            Eigen::Matrix4f eigTcw;
+            bool bTcw = pSolver->iterate(5,bNoMore,vbInliers,nInliers, eigTcw);
+
+            // If Ransac reachs max. iterations discard keyframe
+            if(bNoMore)
+            {
+                vbDiscarded[i]=true;
+                nCandidates--;
+            }
+
+            // If a Camera Pose is computed, optimize
+            if(bTcw)
+            {
+            	//设置当前帧的位姿的初值
+                Sophus::SE3f Tcw(eigTcw);
+                mCurrentFrame.SetPose(Tcw);
+                set<MapPoint*> sFound;
+
+                const int np = vbInliers.size();
+				//更新当前帧的地图点
+                for(int j=0; j<np; j++)
+                {
+                    if(vbInliers[j])
+                    {
+                        mCurrentFrame.mvpMapPoints[j]=vvpMapPointMatches[i][j];
+                        sFound.insert(vvpMapPointMatches[i][j]);
+                    }
+                    else
+                        mCurrentFrame.mvpMapPoints[j]=NULL;
+                }
+				//位姿优化
+                int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+				//内点太少了，直接退出
+                if(nGood<10)
+                    continue;
+				//根据位姿优化后的内点，更新当前帧的地图点
+                for(int io =0; io<mCurrentFrame.N; io++)
+                    if(mCurrentFrame.mvbOutlier[io])
+                        mCurrentFrame.mvpMapPoints[io]=static_cast<MapPoint*>(NULL);
+              .....
+              }
+```
+注意：`sFound`赋值是在PnP后，而不在优化后，说明`sFound`为包含了PnP的所有内点的集合。为啥不在优化后赋值，主要是为了防止通过`SearchByProjection`匹配搜索到**新的匹配**为优化后的外点，那么再位姿优化，内点可能无法达标。
+
+第一次尝试：
+* 因为内点数**不够**`50`，那么尝试通过`SearchByProjection`将关键帧中**不属于当前帧**的地图点投影到当前帧中获得一些新的匹配，新的匹配数为`nadditional`。
+* 如果**新的匹配+内点数**大于50，那么可以再用`PoseOptimization`优化当前帧的位姿试试
+* 这时候判断下是否成功，如果优化后的内点数仍不足`50`而在`[30, 50]`之间，那么说明离匹配不远可以再试试
+```cpp
+  if(nGood<50)
+  {
+      int nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,10,100);
+      if(nadditional+nGood>=50)
+      {
+          nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+       }
+  }
+```
+第二次尝试
+* 因为当前帧的位姿已经优化了很多次，而内点离`50`很近了，说明当前帧的位姿更准，所以缩小搜索窗口，通过`SearchByProjection`在**更狭窄的窗口**上进行搜索得到额外的匹配点数。
+* 如果**新的匹配+内点数**大于50，那么可以再用`PoseOptimization`优化当前帧的位姿试试
+* 如果内点大于`50`，那么匹配成功
+
+
+```cpp
+   if(nGood>30 && nGood<50)
+   {
+       // 用更小窗口、更严格的描述子阈值，重新进行投影搜索匹配
+       sFound.clear();
+       for(int ip =0; ip<mCurrentFrame.N; ip++)
+           if(mCurrentFrame.mvpMapPoints[ip])
+               sFound.insert(mCurrentFrame.mvpMapPoints[ip]);
+       nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,3,64);
+
+       // Final optimization
+       if(nGood+nadditional>=50)
+       {
+           nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+           for(int io =0; io<mCurrentFrame.N; io++)
+               if(mCurrentFrame.mvbOutlier[io])
+                   mCurrentFrame.mvpMapPoints[io]=NULL;
+       }
+   }
+   .....
+```
+注意：
+* `sFound`包含了第一次尝试时当前帧的内点以及额外搜索到的新的匹配
+* 第一尝试优化后没有利用内点更新当前帧的地图点，即使匹配成功，而第二次则有（**不太合理**）
+## DetectRelocalizationCandidates
+`DetectRelocalizationCandidates`的作用是通过词袋模糊搜索在**已有的关键帧**中查找和**当前帧**最接近的候选帧，其函数接口如下：
+```cpp
+vector<KeyFrame *> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F, Map *pMap)
+```
+![在这里插入图片描述](https://img-blog.csdnimg.cn/073b84486ef547768207290265578319.png)
+
+1. 遍历当前帧中所有的`mBowVec`，每个word由`WordId`和`WordValue`组成，利用倒排索引`mvInvertedFile`得到拥有相同`Bow`的关键帧，并统计相同单词的数量
+```cpp
+    list<KeyFrame *> lKFsSharingWords;
+
+    // Search all keyframes that share a word with current frame
+    {
+        unique_lock<mutex> lock(mMutex);
+
+        for (DBoW2::BowVector::const_iterator vit = F->mBowVec.begin(), vend = F->mBowVec.end(); vit != vend; vit++)
+        {
+            list<KeyFrame *> &lKFs = mvInvertedFile[vit->first];
+
+            for (list<KeyFrame *>::iterator lit = lKFs.begin(), lend = lKFs.end(); lit != lend; lit++)
+            {
+                KeyFrame *pKFi = *lit;
+                if (pKFi->mnRelocQuery != F->mnId)
+                {
+                    pKFi->mnRelocWords = 0;
+                    pKFi->mnRelocQuery = F->mnId;
+                    lKFsSharingWords.push_back(pKFi);
+                }
+                pKFi->mnRelocWords++;
+            }
+        }
+    }
+    if (lKFsSharingWords.empty())
+        return vector<KeyFrame *>();
+```
+2. 获得最大最小公共单词数，得到：$minCommonWords = maxCommonWords \cdot 0.8f$
+```cpp
+    int maxCommonWords = 0;
+    for (list<KeyFrame *>::iterator lit = lKFsSharingWords.begin(), lend = lKFsSharingWords.end(); lit != lend; lit++)
+    {
+        if ((*lit)->mnRelocWords > maxCommonWords)
+            maxCommonWords = (*lit)->mnRelocWords;
+    }
+
+    int minCommonWords = maxCommonWords * 0.8f;
+```
+3. 遍历所有具有公共单词的关键帧， 过滤掉公共单词数**小于**`minCommonWords`的关键帧，并计算关键帧与当前帧`mBowVec`的相似性`score`
+```cpp
+    for (list<KeyFrame *>::iterator lit = lKFsSharingWords.begin(), lend = lKFsSharingWords.end(); lit != lend; lit++)
+    {
+        KeyFrame *pKFi = *lit;
+
+        if (pKFi->mnRelocWords > minCommonWords)
+        {
+            nscores++;
+            float si = mpVoc->score(F->mBowVec, pKFi->mBowVec);
+            pKFi->mRelocScore = si;
+            lScoreAndMatch.push_back(make_pair(si, pKFi));
+        }
+    }
+```
+4. 每个关键帧和最佳的10个共视关键帧组队，得到每组中分数最大的关键帧和组的总分数
+```cpp
+    list<pair<float, KeyFrame *>> lAccScoreAndMatch;
+    float bestAccScore = 0;
+
+    // Lets now accumulate score by covisibility
+    for (list<pair<float, KeyFrame *>>::iterator it = lScoreAndMatch.begin(), itend = lScoreAndMatch.end(); it != itend; it++)
+    {
+        KeyFrame *pKFi = it->second;
+        vector<KeyFrame *> vpNeighs = pKFi->GetBestCovisibilityKeyFrames(10);
+
+        float bestScore = it->first;
+        float accScore = bestScore;
+        KeyFrame *pBestKF = pKFi;
+        for (vector<KeyFrame *>::iterator vit = vpNeighs.begin(), vend = vpNeighs.end(); vit != vend; vit++)
+        {
+            KeyFrame *pKF2 = *vit;
+            if (pKF2->mnRelocQuery != F->mnId)
+                continue;
+
+            accScore += pKF2->mRelocScore;
+            if (pKF2->mRelocScore > bestScore)
+            {
+                pBestKF = pKF2;
+                bestScore = pKF2->mRelocScore;
+            }
+        }
+        lAccScoreAndMatch.push_back(make_pair(accScore, pBestKF));
+        if (accScore > bestAccScore)
+            bestAccScore = accScore;
+    }
+```
+5. 过滤掉组的总分数不合格的关键帧，得到最终的结果
+```cpp
+    float minScoreToRetain = 0.75f * bestAccScore;
+    set<KeyFrame *> spAlreadyAddedKF;
+    vector<KeyFrame *> vpRelocCandidates;
+    vpRelocCandidates.reserve(lAccScoreAndMatch.size());
+    for (list<pair<float, KeyFrame *>>::iterator it = lAccScoreAndMatch.begin(), itend = lAccScoreAndMatch.end(); it != itend; it++)
+    {
+        const float &si = it->first;
+        if (si > minScoreToRetain)
+        {
+            KeyFrame *pKFi = it->second;
+            if (pKFi->GetMap() != pMap)
+                continue;
+            if (!spAlreadyAddedKF.count(pKFi))
+            {
+                vpRelocCandidates.push_back(pKFi);
+                spAlreadyAddedKF.insert(pKFi);
+            }
+        }
+    }
+```
+# 匹配
+## SearchForInitialization
+`SearchForInitialization`主要的作用是寻找**初始帧F1**与**当前帧F2**之间的匹配关系`vnMatches12`，其输入参数如下：
+
+|  参数                                                                                                                                                                                                |  描述            |
+|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------------|
+| F1                                                                                                                                                                                               | 初始帧            |
+| F2                                                                                                                                                                                                 | 当前帧            |
+| vbPrevMatched                                                                                                                                                                                      | 初始帧中特征点的坐标     |
+| vnMatches12                                                                                                                                                                                        | 匹配关系           |
+| windowSize                                                                                                                                                                                         | 搜索窗口大小         |  
+
+其组件包括：搜索窗口、重复匹配过滤、最佳描述子距离、最优与次优比值、旋转直方图
+### 1.旋转直方图的构建
+```cpp
+        // Step 1 构建旋转直方图，HISTO_LENGTH = 30
+        vector<int> rotHist[HISTO_LENGTH];
+        // 每个bin里预分配500个，因为使用的是vector不够的话可以自动扩展容量
+        for(int i=0;i<HISTO_LENGTH;i++)
+            rotHist[i].reserve(500);
+        //! 原作者代码是 const float factor = 1.0f/HISTO_LENGTH; 是错误的，更改为下面代码
+        // const float factor = HISTO_LENGTH/360.0f;
+        const float factor = 1.0f/HISTO_LENGTH;
+```
+### 2.搜索候选匹配点
+遍历`F1`中的所有特征点，在`F2`上寻找候选匹配点
+![在这里插入图片描述](https://img-blog.csdnimg.cn/470f6f5fa6cd49acb5f26a2c7bae9d8e.png)
+
+```cpp
+        // 遍历帧1中的所有特征点
+        for(size_t i1=0, iend1=F1.mvKeysUn.size(); i1<iend1; i1++)
+        {
+            cv::KeyPoint kp1 = F1.mvKeysUn[i1];
+            int level1 = kp1.octave;
+            // 只使用原始图像上提取的特征点
+            if(level1>0)
+                continue;
+
+            // Step 2 在半径窗口内搜索当前帧F2中所有的候选匹配特征点 
+            // vbPrevMatched 输入的是参考帧 F1的特征点
+            // windowSize = 100，输入最大最小金字塔层级 均为0
+            vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
+```
+### 3.通过描述子的距离搜索候选匹配点中的最优与次优
+ * 注意：`vMatchedDistance`
+	* 描述：**vMatchedDistance**的size为**F2**的特征点数目，**vMatchedDistance**用于存储与**F2**的第**index**特征点匹配**最佳**的**描述子距离**
+	* 作用：当**vMatchedDistance**的第**index**位置**非INT_MAX**，那么说明**F1**中已经有特征点和其匹配上了，**F1**中其他特征点想和**F2**中第**index**特征点再匹配上，就必须更好，小于此距离。
+	* 例子：比如`F1`中的特征点`1`与`F2`中的特征点`2`已匹配上，那么`F1`中特征点`2`搜到的候选匹配点包括`0, 1, 2, 3`，分别计算对应的描述子距离，对于`F2`中的特征点`2`，用`vMatchedDistance`对其进行过滤(`5 > 4`)
+	![在这里插入图片描述](https://img-blog.csdnimg.cn/722f3ae0afad4a099b446b96f00d5e38.png)
+
+
+```cpp
+            // Step 3 遍历搜索搜索窗口中的所有潜在的匹配候选点，找到最优的和次优的
+            for(vector<size_t>::iterator vit=vIndices2.begin(); vit!=vIndices2.end(); vit++)
+            {
+                size_t i2 = *vit;
+                // 取出候选特征点对应的描述子
+                cv::Mat d2 = F2.mDescriptors.row(i2);
+                // 计算两个特征点描述子距离
+                int dist = DescriptorDistance(d1,d2);
+
+                if(vMatchedDistance[i2]<=dist)
+                    continue;
+                // 如果当前匹配距离更小，更新最佳次佳距离
+                if(dist<bestDist)
+                {
+                    bestDist2=bestDist;
+                    bestDist=dist;
+                    bestIdx2=i2;
+                }
+                else if(dist<bestDist2)
+                {
+                    bestDist2=dist;
+                }
+            }
+```
+### 4.条件筛选
+* 最佳描述子距离小于阈值
+* 最佳距离比次佳距离要小于设定的比例
+* 删除重复匹配
+```cpp
+            // Step 4 对最优次优结果进行检查，满足阈值、最优/次优比例，删除重复匹配
+            // 即使算出了最佳描述子匹配距离，也不一定保证配对成功。要小于设定阈值
+            if(bestDist<=TH_LOW)
+            {
+                // 最佳距离比次佳距离要小于设定的比例，这样特征点辨识度更高
+                if(bestDist<(float)bestDist2*mfNNratio)
+                {
+                    // 如果找到的候选特征点对应F1中特征点已经匹配过了，说明发生了重复匹配，将原来的匹配也删掉
+                    if(vnMatches21[bestIdx2]>=0)
+                    {
+                        vnMatches12[vnMatches21[bestIdx2]]=-1;
+                        nmatches--;
+                    }
+                    // 次优的匹配关系，双向建立
+                    // vnMatches12保存参考帧F1和F2匹配关系，index保存是F1对应特征点索引，值保存的是匹配好的F2特征点索引
+                    vnMatches12[i1]=bestIdx2;
+                    vnMatches21[bestIdx2]=i1;
+                    vMatchedDistance[bestIdx2]=bestDist;
+                    nmatches++;
+
+                    // Step 5 计算匹配点旋转角度差所在的直方图
+                    if(mbCheckOrientation)
+                    {
+                        // 计算匹配特征点的角度差，这里单位是角度°，不是弧度
+                        float rot = F1.mvKeysUn[i1].angle-F2.mvKeysUn[bestIdx2].angle;
+                        if(rot<0.0)
+                            rot+=360.0f;
+                        // 前面factor = HISTO_LENGTH/360.0f 
+                        // bin = rot / 360.of * HISTO_LENGTH 表示当前rot被分配在第几个直方图bin  
+                        int bin = round(rot*factor);
+                        // 如果bin 满了又是一个轮回
+                        if(bin==HISTO_LENGTH)
+                            bin=0;
+                        assert(bin>=0 && bin<HISTO_LENGTH);
+                        rotHist[bin].push_back(i1);
+                    }
+                }
+            }
+```
+* vnMatches21的作用
+	* 描述：**vnMatches21**的size为**F2**的特征点数目，**vnMatches21**用于存储**F1**中与**F2**的第**index**特征点匹配**最佳**的**索引**
+	* 作用：当**vMatches21**的第**index**位置**非-1**，那么说明**F1**中已经有特征点**m**和其匹配上了，如果还有**F1**中其他特征点和**F2**中第**index**特征点匹配上，那么此为重复匹配，上一次的匹配结果**m**就不能要(vnMatches12[m] = -1)，最后将这次的匹配结果保存到**vnMatches21**和**vMatchedDistance**的index位置。
+	* `F1`中的第`0`个特征点和`F2`中的第`3`个特征点已经匹配，现在F1中的第`3`个特征点也和F2中的第`3`个特征点匹配上了，那么需要将F2中的第`3`个特征点的最佳匹配**更新**为F1中的第`3`个特征点，且在最终结果`vnMathes12`中将F1中第`0`个特征点的匹配置为无效(`-1`)，**最后更新**F2中第3个特征点的**最佳距离**
+	![在这里插入图片描述](https://img-blog.csdnimg.cn/ec30ff73a74841deb36c3e33a0754fc7.png)
+### 5.旋转直方图
+统计旋转直方图，选取前三个方向，其余全部剔除，因为匹配的方向具有一致性
+![在这里插入图片描述](https://img-blog.csdnimg.cn/f8693a5caa1a4c5fa2939ffcb166c762.png)
+```cpp
+        // Step 6 筛除旋转直方图中“非主流”部分
+        if(mbCheckOrientation)
+        {
+            int ind1=-1;
+            int ind2=-1;
+            int ind3=-1;
+            // 筛选出在旋转角度差落在在直方图区间内数量最多的前三个bin的索引
+            ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
+
+            for(int i=0; i<HISTO_LENGTH; i++)
+            {
+                if(i==ind1 || i==ind2 || i==ind3)
+                    continue;
+                // 剔除掉不在前三的匹配对，因为他们不符合“主流旋转方向”    
+                for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
+                {
+                    int idx1 = rotHist[i][j];
+                    if(vnMatches12[idx1]>=0)
+                    {
+                        vnMatches12[idx1]=-1;
+                        nmatches--;
+                    }
+                }
+            }
+
+        }
+```
+### 6.更新匹配
+```cpp
+        // Step 7 将最后通过筛选的匹配好的特征点保存到vbPrevMatched
+        for(size_t i1=0, iend1=vnMatches12.size(); i1<iend1; i1++)
+            if(vnMatches12[i1]>=0)
+                vbPrevMatched[i1]=F2.mvKeysUn[vnMatches12[i1]].pt;
+```
+## SearchByProjection(TrackWithMotionModel)
+
+`SearchByProjection`函数接口：
+
+```cpp
+int ORBmatcher::SearchByProjection(
+    Frame &CurrentFrame,
+    const Frame &LastFrame,
+    const float th,
+    const bool bMono
+)
+```
+
+### 1.旋转直方图的构建
+
+```cpp
+vector<int> rotHist[HISTO_LENGTH];
+for(int i=0;i<HISTO_LENGTH;i++)
+    rotHist[i].reserve(500);
+const float factor = 1.0f/HISTO_LENGTH;
+```
+### 2.计算当前帧和前一帧的平移$t_{lc}$，判断相机是前进还是后退
+
+* 近大远小，尺度越大，图像越小
+
+* 前进：$z > b$，物体在当前帧的图像上**变大**，因此对于上一帧的特征点，需要在当前帧**更高**的尺度上搜索
+* 后退：$z < -b$，物体在当前帧的图像上**变小**，因此对于上一帧的特征点，需要在当前帧**更低**的尺度上搜索
+
+```cpp
+        const Sophus::SE3f Tcw = CurrentFrame.GetPose();
+        const Eigen::Vector3f twc = Tcw.inverse().translation();
+
+        const Sophus::SE3f Tlw = LastFrame.GetPose();
+        const Eigen::Vector3f tlc = Tlw * twc;
+
+        const bool bForward = tlc(2)>CurrentFrame.mb && !bMono;
+        const bool bBackward = -tlc(2)>CurrentFrame.mb && !bMono;
+```
+### 3.对于前一帧的每一个地图点，通过相机投影模型，投影到当前帧
+
+```cpp
+        Eigen::Vector3f x3Dw = pMP->GetWorldPos();
+        Eigen::Vector3f x3Dc = Tcw * x3Dw;
+
+        const float xc = x3Dc(0);
+        const float yc = x3Dc(1);
+        const float invzc = 1.0/x3Dc(2);
+
+        if(invzc<0)
+            continue;
+
+        Eigen::Vector2f uv = CurrentFrame.mpCamera->project(x3Dc);
+```
+![在这里插入图片描述](https://img-blog.csdnimg.cn/10bf7c4ba9c44055a9accc0e6fb45565.png)
+
+### 4.根据相机的前进后退方向来判断搜索尺度范围
+
+* 前进：$z > b$，物体在当前帧的图像上**变大**，因此对于上一帧的特征点，需要在当前帧**更高**的尺度上搜索
+* 后退：$z < -b$，物体在当前帧的图像上**变小**，因此对于上一帧的特征点，需要在当前帧**更低**的尺度上搜索
+![在这里插入图片描述](https://img-blog.csdnimg.cn/be2af519b6c449a09446d30c3385d268.png)
+
+
+```cpp
+    if(uv(0)<CurrentFrame.mnMinX || uv(0)>CurrentFrame.mnMaxX)
+        continue;
+    if(uv(1)<CurrentFrame.mnMinY || uv(1)>CurrentFrame.mnMaxY)
+        continue;
+
+    int nLastOctave = (LastFrame.Nleft == -1 || i < LastFrame.Nleft) ? 	
+        LastFrame.mvKeys[i].octave : LastFrame.mvKeysRight[i - LastFrame.Nleft].octave;
+
+    // Search in a window. Size depends on scale
+    float radius = th*CurrentFrame.mvScaleFactors[nLastOctave];
+
+    vector<size_t> vIndices2;
+
+    if(bForward)
+        vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, nLastOctave);
+    else if(bBackward)
+        vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, 0, nLastOctave);
+    else
+        vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, nLastOctave-1, nLastOctave+1);
+
+    if(vIndices2.empty())
+        continue;
+```
+### 5.遍历候选匹配点，寻找距离最小的最佳匹配点
+这里就简单选了个最佳匹配点，其他的像剔除重复匹配，最佳和次佳比都没做
+
+```cpp
+    const cv::Mat dMP = pMP->GetDescriptor();
+
+    int bestDist = 256;
+    int bestIdx2 = -1;
+
+    // Step 5 遍历候选匹配点，寻找距离最小的最佳匹配点 
+    for(vector<size_t>::const_iterator vit=vIndices2.begin(), vend=vIndices2.end(); vit!=vend; vit++)
+    {
+        const size_t i2 = *vit;
+
+        // 如果该特征点已经有对应的MapPoint了,则退出该次循环
+        if(CurrentFrame.mvpMapPoints[i2])
+            if(CurrentFrame.mvpMapPoints[i2]->Observations()>0)
+                continue;
+
+        if(CurrentFrame.Nleft == -1 && CurrentFrame.mvuRight[i2]>0)
+        {
+            // 双目和rgbd的情况，需要保证右图的点也在搜索半径以内
+            const float ur = uv(0) - CurrentFrame.mbf*invzc;
+            const float er = fabs(ur - CurrentFrame.mvuRight[i2]);
+            if(er>radius)
+                continue;
+        }
+
+        const cv::Mat &d = CurrentFrame.mDescriptors.row(i2);
+
+        const int dist = DescriptorDistance(dMP,d);
+
+        if(dist<bestDist)
+        {
+            bestDist=dist;
+            bestIdx2=i2;
+        }
+    }
+```
+### 6.计算匹配点对的**旋转角度差**所在的直方图
+```cpp
+// 最佳匹配距离要小于设定阈值
+if(bestDist<=TH_HIGH)
+{
+    CurrentFrame.mvpMapPoints[bestIdx2]=pMP;
+    nmatches++;
+
+    // Step 6 计算匹配点旋转角度差所在的直方图
+    if(mbCheckOrientation)
+    {
+        cv::KeyPoint kpLF = (LastFrame.Nleft == -1) ? LastFrame.mvKeysUn[i]
+                                                    : (i < LastFrame.Nleft) ? 		LastFrame.mvKeys[i]
+                                                                            : LastFrame.mvKeysRight[i - LastFrame.Nleft];
+
+        cv::KeyPoint kpCF = (CurrentFrame.Nleft == -1) ? CurrentFrame.mvKeysUn[bestIdx2]
+                                                    : (bestIdx2 < CurrentFrame.Nleft) ? CurrentFrame.mvKeys[bestIdx2]
+                                                                                        : CurrentFrame.mvKeysRight[bestIdx2 - CurrentFrame.Nleft];
+        float rot = kpLF.angle-kpCF.angle;
+        if(rot<0.0)
+            rot+=360.0f;
+        int bin = round(rot*factor);
+        if(bin==HISTO_LENGTH)
+            bin=0;
+        assert(bin>=0 && bin<HISTO_LENGTH);
+        rotHist[bin].push_back(bestIdx2);
+    }
+}
+```
+### 7.进行旋转一致检测，剔除不一致的匹配
+![在这里插入图片描述](https://img-blog.csdnimg.cn/69ca90e110524f1689d938135b2aeeb9.png)
+```cpp
+        //Apply rotation consistency
+        //  Step 7 进行旋转一致检测，剔除不一致的匹配
+        if(mbCheckOrientation)
+        {
+            int ind1=-1;
+            int ind2=-1;
+            int ind3=-1;
+
+            ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
+
+            for(int i=0; i<HISTO_LENGTH; i++)
+            {
+                // 对于数量不是前3个的点对，剔除
+                if(i!=ind1 && i!=ind2 && i!=ind3)
+                {
+                    for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
+                    {
+                        CurrentFrame.mvpMapPoints[rotHist[i][j]]=static_cast<MapPoint*>(NULL);
+                        nmatches--;
+                    }
+                }
+            }
+        }
+```
+## SearchByProjection(TrackLocalMap)
+`SearchByProjection`通过将**局部地图中在当前帧视野范围内的地图点**投影到**当前帧**寻找更多的匹配关系，其函数接口：
+
+```cpp
+int ORBmatcher::SearchByProjection(
+	Frame &F,
+	const vector<MapPoint*> &vpMapPoints,
+	const float th,
+	const bool bFarPoints,
+	const float thFarPoints
+)
+```
+### 1.对当前帧视野范围内的地图点`mbTrackInView = true`进行投影
 ```cpp
         // Step 1 遍历有效的局部地图点
         for(size_t iMP=0; iMP<vpMapPoints.size(); iMP++)
@@ -4866,8 +4857,8 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
                 continue;
 ```
 
-2. 通过地图点的投影获得当前帧的候选匹配点
-	* 若视角夹角较小时, 搜索半径较小
+### 2.通过地图点的投影获得当前帧的候选匹配点
+若视角夹角较小时, 搜索半径较小
 ```cpp
                 // 通过距离预测的金字塔层数，该层数相对于当前的帧
                 const int &nPredictedLevel = pMP->mnTrackScaleLevel;
@@ -4886,7 +4877,7 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
                                             r*F.mvScaleFactors[nPredictedLevel],    // 认为搜索窗口的大小和该特征点被追踪到时所处的尺度也有关系
                                             nPredictedLevel-1,nPredictedLevel);     // 搜索的图层范围
 ```
-3. 在候选匹配点中，搜索地图点的最佳与次佳匹配点
+### 3.在候选匹配点中，搜索地图点的最佳与次佳匹配点
 ```cpp
         const cv::Mat MPdescriptor = pMP->GetDescriptor();
 
@@ -4946,10 +4937,11 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
             }
         }
 ```
-4. 条件筛选匹配
-	* 最佳匹配距离需要小于阈值`TH_HIGH`
-	* 最佳匹配距离与次佳匹配距离小于阈值`mfNNratio`
-	* 最佳和次佳不在同一金字塔层级
+### 4.条件筛选匹配
+条件：
+* 最佳匹配距离需要小于阈值`TH_HIGH`
+* 最佳匹配距离与次佳匹配距离小于阈值`mfNNratio`
+* 最佳和次佳不在同一金字塔层级
 ```cpp
              // 最佳匹配距离还需要满足在设定阈值内
              if(bestDist<=TH_HIGH)
@@ -4973,46 +4965,592 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
                  }
              }
 ```
-## 3.优化
-优化分为两种情况：
-* IMU未初始化 或者 刚刚重定位：`PoseOptimization`
-* 其他情况：`PoseInertialOptimizationLastFrame`或者`PoseInertialOptimizationLastKeyFrame`
+## SearchByProjection(Relocalization)
+`SearchByProjection`的主要作用是通过将关键帧中的地图点投影到当前帧寻找两帧之间**新的匹配**，关键帧中的地图点不在`sAlreadyFound`中
+1. 构造旋转直方图
 ```cpp
-    // Step 3：前面新增了更多的匹配关系，BA优化得到更准确的位姿
-    int inliers;
-    // IMU未初始化，仅优化位姿
-    if (!mpAtlas->isImuInitialized())
-        Optimizer::PoseOptimization(&mCurrentFrame);
-    else
-    {
-        // 初始化，重定位，重新开启一个地图都会使mnLastRelocFrameId变化
-        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
+        vector<int> rotHist[HISTO_LENGTH];
+        for(int i=0;i<HISTO_LENGTH;i++)
+            rotHist[i].reserve(500);
+        const float factor = 1.0f/HISTO_LENGTH;
+```
+2. 将关键帧中的地图点投影到当前帧寻找匹配，需要满足如下要求：
+	* 该地图点不在`sAlreadyFound`中
+	* 深度$\mathbf{dist3D}=\mathbf{norm}\left(X_w-O_w\right)$ 必须在$[\mathbf{minDistance}, \mathbf{maxDistance}]$之内
+	* 根据地图点在当前帧预测的尺度搜索候选匹配点
+	* 最佳匹配距离小于阈值`ORBdist`
+	* 计算旋转直方图
+```cpp
+        for(size_t i=0, iend=vpMPs.size(); i<iend; i++)
         {
-            Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
-            Optimizer::PoseOptimization(&mCurrentFrame);
-        }
-        else  // 如果积累的IMU数据量比较多，考虑使用IMU数据优化
-        {
-            // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
-            // mbMapUpdated变化见Tracking::PredictStateIMU()
-            // 未更新地图
-            if(!mbMapUpdated) //  && (mnMatchesInliers>30))
+            MapPoint* pMP = vpMPs[i];
+
+            if(pMP)
             {
-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
-                // 使用上一普通帧以及当前帧的视觉信息和IMU信息联合优化当前帧位姿、速度和IMU零偏
-                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                if(!pMP->isBad() && !sAlreadyFound.count(pMP))
+                {
+                    //Project
+                    Eigen::Vector3f x3Dw = pMP->GetWorldPos();
+                    Eigen::Vector3f x3Dc = Tcw * x3Dw;
+
+                    const Eigen::Vector2f uv = CurrentFrame.mpCamera->project(x3Dc);
+
+                    if(uv(0)<CurrentFrame.mnMinX || uv(0)>CurrentFrame.mnMaxX)
+                        continue;
+                    if(uv(1)<CurrentFrame.mnMinY || uv(1)>CurrentFrame.mnMaxY)
+                        continue;
+
+                    // Compute predicted scale level
+                    Eigen::Vector3f PO = x3Dw-Ow;
+                    float dist3D = PO.norm();
+
+                    const float maxDistance = pMP->GetMaxDistanceInvariance();
+                    const float minDistance = pMP->GetMinDistanceInvariance();
+
+                    // Depth must be inside the scale pyramid of the image
+                    if(dist3D<minDistance || dist3D>maxDistance)
+                        continue;
+
+                    //预测尺度
+                    int nPredictedLevel = pMP->PredictScale(dist3D,&CurrentFrame);
+
+                    // Search in a window
+                    const float radius = th*CurrentFrame.mvScaleFactors[nPredictedLevel];
+
+                    //  Step 3 搜索候选匹配点
+                    const vector<size_t> vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0), uv(1), radius, nPredictedLevel-1, nPredictedLevel+1);
+
+                    if(vIndices2.empty())
+                        continue;
+
+                    const cv::Mat dMP = pMP->GetDescriptor();
+
+                    int bestDist = 256;
+                    int bestIdx2 = -1;
+                    // Step 4 遍历候选匹配点，寻找距离最小的最佳匹配点 
+                    for(vector<size_t>::const_iterator vit=vIndices2.begin(); vit!=vIndices2.end(); vit++)
+                    {
+                        const size_t i2 = *vit;
+                        if(CurrentFrame.mvpMapPoints[i2])
+                            continue;
+
+                        const cv::Mat &d = CurrentFrame.mDescriptors.row(i2);
+
+                        const int dist = DescriptorDistance(dMP,d);
+
+                        if(dist<bestDist)
+                        {
+                            bestDist=dist;
+                            bestIdx2=i2;
+                        }
+                    }
+
+                    if(bestDist<=ORBdist)
+                    {
+                        CurrentFrame.mvpMapPoints[bestIdx2]=pMP;
+                        nmatches++;
+                        // Step 5 计算匹配点旋转角度差所在的直方图
+                        if(mbCheckOrientation)
+                        {
+                            float rot = pKF->mvKeysUn[i].angle-CurrentFrame.mvKeysUn[bestIdx2].angle;
+                            if(rot<0.0)
+                                rot+=360.0f;
+                            int bin = round(rot*factor);
+                            if(bin==HISTO_LENGTH)
+                                bin=0;
+                            assert(bin>=0 && bin<HISTO_LENGTH);
+                            rotHist[bin].push_back(bestIdx2);
+                        }
+                    }
+
+                }
+            }
+        }
+```
+3. 旋转一致检测，剔除不一致的匹配
+```cpp
+        if(mbCheckOrientation)
+        {
+            int ind1=-1;
+            int ind2=-1;
+            int ind3=-1;
+
+            ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
+
+            for(int i=0; i<HISTO_LENGTH; i++)
+            {
+                if(i!=ind1 && i!=ind2 && i!=ind3)
+                {
+                    for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
+                    {
+                        CurrentFrame.mvpMapPoints[rotHist[i][j]]=NULL;
+                        nmatches--;
+                    }
+                }
+            }
+        }
+```
+## SearchByBow(Tracking)
+
+`SearchByBow`的函数接口为：
+
+```cpp
+int ORBmatcher::SearchByBoW(
+    KeyFrame* pKF,
+    Frame &F,
+    vector<MapPoint*> &vpMapPointMatches
+)
+```
+
+### 1.构造旋转直方图
+
+```cpp
+        // 特征点角度旋转差统计用的直方图
+        vector<int> rotHist[HISTO_LENGTH];
+        for(int i=0;i<HISTO_LENGTH;i++)
+            rotHist[i].reserve(500);
+
+        // 将0~360的数转换到0~HISTO_LENGTH的系数
+        //! 原作者代码是 const float factor = 1.0f/HISTO_LENGTH; 是错误的，更改为下面代码  
+        // const float factor = HISTO_LENGTH/360.0f;
+        const float factor = 1.0f/HISTO_LENGTH;
+```
+### 2.对于`pKF`与`F`的`FeatureVector `，对属于**同一节点**的ORB特征进行匹配
+
+为什么用`FeatureVector`能加快搜索？从词汇树中可以看出，`Node`相对于`Word`为更加抽象的簇，一个`Node`下包含了许多的**相似的**`Word`。如果想比较两个东西，那么先用**抽象特征**进行粗筛，然后再**逐步到**具体的特征。两帧图像特征匹配类似，先对比`FeatureVector`中的`Node`，如果`Node`为同一节点，再用节点下`features`进行匹配，这样避免了所有特征点之间的两两匹配
+```cpp
+        // 取出关键帧的词袋特征向量
+        const DBoW2::FeatureVector &vFeatVecKF = pKF->mFeatVec;
+        // We perform the matching over ORB that belong to the same vocabulary node (at a certain level)
+        // 将属于同一节点的ORB特征进行匹配
+        DBoW2::FeatureVector::const_iterator KFit = vFeatVecKF.begin();
+        DBoW2::FeatureVector::const_iterator Fit = F.mFeatVec.begin();
+        DBoW2::FeatureVector::const_iterator KFend = vFeatVecKF.end();
+        DBoW2::FeatureVector::const_iterator Fend = F.mFeatVec.end();
+
+        while(KFit != KFend && Fit != Fend)
+        {
+            // Step 1：分别取出属于同一node的ORB特征点
+            if(KFit->first == Fit->first) 
+            {
+            	...
+                KFit++;
+                Fit++;
+            }
+            else if(KFit->first < Fit->first)
+            {
+                // 对齐
+                KFit = vFeatVecKF.lower_bound(Fit->first);
             }
             else
             {
-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
-                // 使用上一关键帧以及当前帧的视觉信息和IMU信息联合优化当前帧位姿、速度和IMU零偏
-                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                // 对齐
+                Fit = F.mFeatVec.lower_bound(KFit->first);
             }
         }
-    }
 ```
+### 3.对同一node，用`KF`中**地图点对应的ORB特征点**与`F`中的**ORB特征点**两两匹配
+
+其条件：
+
+* 不能重复匹配`vpMapPointMatches`：如果`vpMapPointMatches[realIdxF]`非`NULL`，说明已有匹配了，则不能再匹配
+* 最佳匹配距离小于阈值`TH_LOW`
+* 最佳匹配距离与次佳匹配距离的比值小于阈值`mfNNratio`
+
+```cpp
+                // second 是该node内存储的feature index
+                const vector<unsigned int> vIndicesKF = KFit->second;
+                const vector<unsigned int> vIndicesF = Fit->second;
+
+                // Step 2：遍历KF中属于该node的特征点
+                for(size_t iKF=0; iKF<vIndicesKF.size(); iKF++)
+                {
+                    // 关键帧该节点中特征点的索引
+                    const unsigned int realIdxKF = vIndicesKF[iKF];
+
+                    // 取出KF中该特征对应的地图点
+                    MapPoint* pMP = vpMapPointsKF[realIdxKF];
+
+                    if(!pMP)
+                        continue;
+
+                    if(pMP->isBad())
+                        continue;
+                    // 取出关键帧KF中该特征对应的描述子
+                    const cv::Mat &dKF= pKF->mDescriptors.row(realIdxKF); 
+
+                    int bestDist1=256; // 最好的距离（最小距离）
+                    int bestIdxF =-1 ;
+                    int bestDist2=256; // 次好距离（倒数第二小距离）
+
+                    int bestDist1R=256;
+                    int bestIdxFR =-1 ;
+                    int bestDist2R=256;
+                    // Step 3：遍历F中属于该node的特征点，寻找最佳匹配点
+                    for(size_t iF=0; iF<vIndicesF.size(); iF++)
+                    {
+                        if(F.Nleft == -1){
+                            // 这里的realIdxF是指普通帧该节点中特征点的索引
+                            const unsigned int realIdxF = vIndicesF[iF];
+
+                            // 如果地图点存在，说明这个点已经被匹配过了，不再匹配，加快速度
+                            if(vpMapPointMatches[realIdxF])
+                                continue;
+                            // 取出普通帧F中该特征对应的描述子
+                            const cv::Mat &dF = F.mDescriptors.row(realIdxF);
+                            // 计算描述子的距离
+                            const int dist =  DescriptorDistance(dKF,dF);
+
+                            // 遍历，记录最佳距离、最佳距离对应的索引、次佳距离等
+                            // 如果 dist < bestDist1 < bestDist2，更新bestDist1 bestDist2
+                            if(dist<bestDist1)
+                            {
+                                bestDist2=bestDist1;
+                                bestDist1=dist;
+                                bestIdxF=realIdxF;
+                            }
+                            // 如果bestDist1 < dist < bestDist2，更新bestDist2
+                            else if(dist<bestDist2)
+                            {
+                                bestDist2=dist;
+                            }
+                        }
+                        else{
+                            const unsigned int realIdxF = vIndicesF[iF];
+
+                            if(vpMapPointMatches[realIdxF])
+                                continue;
+
+                            const cv::Mat &dF = F.mDescriptors.row(realIdxF);
+
+                            const int dist =  DescriptorDistance(dKF,dF);
+
+                            if(realIdxF < F.Nleft && dist<bestDist1){
+                                bestDist2=bestDist1;
+                                bestDist1=dist;
+                                bestIdxF=realIdxF;
+                            }
+                            else if(realIdxF < F.Nleft && dist<bestDist2){
+                                bestDist2=dist;
+                            }
+
+                            if(realIdxF >= F.Nleft && dist<bestDist1R){
+                                bestDist2R=bestDist1R;
+                                bestDist1R=dist;
+                                bestIdxFR=realIdxF;
+                            }
+                            else if(realIdxF >= F.Nleft && dist<bestDist2R){
+                                bestDist2R=dist;
+                            }
+                        }
+
+                    }
+                    // Step 4：根据阈值 和 角度投票剔除误匹配
+                    // Step 4.1：第一关筛选：匹配距离必须小于设定阈值
+                    if(bestDist1<=TH_LOW)
+                    {
+                        // Step 4.2：第二关筛选：最佳匹配比次佳匹配明显要好，那么最佳匹配才真正靠谱
+                        if(static_cast<float>(bestDist1)<mfNNratio*static_cast<float>(bestDist2))
+                        {
+                            // Step 4.3：记录成功匹配特征点的对应的地图点(来自关键帧)
+                            vpMapPointMatches[bestIdxF]=pMP;
+
+                            // 这里的realIdxKF是当前遍历到的关键帧的特征点id
+                            const cv::KeyPoint &kp =
+                                    (!pKF->mpCamera2) ? pKF->mvKeysUn[realIdxKF] :
+                                    (realIdxKF >= pKF -> NLeft) ? pKF -> mvKeysRight[realIdxKF - pKF -> NLeft]
+                                                                : pKF -> mvKeys[realIdxKF];
+                            // Step 4.4：计算匹配点旋转角度差所在的直方图
+                            if(mbCheckOrientation)
+                            {
+                                cv::KeyPoint &Fkp =
+                                        (!pKF->mpCamera2 || F.Nleft == -1) ? F.mvKeys[bestIdxF] :
+                                        (bestIdxF >= F.Nleft) ? F.mvKeysRight[bestIdxF - F.Nleft]
+                                                            : F.mvKeys[bestIdxF];
+                                // 所有的特征点的角度变化应该是一致的，通过直方图统计得到最准确的角度变化值
+                                float rot = kp.angle-Fkp.angle;
+                                if(rot<0.0)
+                                    rot+=360.0f;
+                                int bin = round(rot*factor);// 将rot分配到bin组, 四舍五入, 其实就是离散到对应的直方图组中
+                                if(bin==HISTO_LENGTH)
+                                    bin=0;
+                                assert(bin>=0 && bin<HISTO_LENGTH);
+                                rotHist[bin].push_back(bestIdxF);
+                            }
+                            nmatches++;
+                        }
+
+                        if(bestDist1R<=TH_LOW)
+                        {
+                            if(static_cast<float>(bestDist1R)<mfNNratio*static_cast<float>(bestDist2R) || true)
+                            {
+                                vpMapPointMatches[bestIdxFR]=pMP;
+
+                                const cv::KeyPoint &kp =
+                                        (!pKF->mpCamera2) ? pKF->mvKeysUn[realIdxKF] :
+                                        (realIdxKF >= pKF -> NLeft) ? pKF -> mvKeysRight[realIdxKF - pKF -> NLeft]
+                                                                    : pKF -> mvKeys[realIdxKF];
+
+                                if(mbCheckOrientation)
+                                {
+                                    cv::KeyPoint &Fkp =
+                                            (!F.mpCamera2) ? F.mvKeys[bestIdxFR] :
+                                            (bestIdxFR >= F.Nleft) ? F.mvKeysRight[bestIdxFR - F.Nleft]
+                                                                : F.mvKeys[bestIdxFR];
+
+                                    float rot = kp.angle-Fkp.angle;
+                                    if(rot<0.0)
+                                        rot+=360.0f;
+                                    int bin = round(rot*factor);
+                                    if(bin==HISTO_LENGTH)
+                                        bin=0;
+                                    assert(bin>=0 && bin<HISTO_LENGTH);
+                                    rotHist[bin].push_back(bestIdxFR);
+                                }
+                                nmatches++;
+                            }
+                        }
+                    }
+
+                }
+```
+### 4.旋转一致检测，剔除不一致的匹配
+![在这里插入图片描述](https://img-blog.csdnimg.cn/5cfbe40185ea47d895fd84f63f7abbbe.png)
+
+```cpp
+        // Step 5 根据方向剔除误匹配的点
+        if(mbCheckOrientation)
+        {
+            // index
+            int ind1=-1;
+            int ind2=-1;
+            int ind3=-1;
+
+            // 筛选出在旋转角度差落在在直方图区间内数量最多的前三个bin的索引
+            ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
+
+            for(int i=0; i<HISTO_LENGTH; i++)
+            {
+                // 如果特征点的旋转角度变化量属于这三个组，则保留
+                if(i==ind1 || i==ind2 || i==ind3)
+                    continue;
+
+                // 剔除掉不在前三的匹配对，因为他们不符合“主流旋转方向”  
+                for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
+                {
+                    vpMapPointMatches[rotHist[i][j]]=static_cast<MapPoint*>(NULL);
+                    nmatches--;
+                }
+            }
+        }
+```
+# 优化
+
 ## PoseOptimization
-参考[ORB_SLAM3 TrackWithMotionModel 中的优化](https://blog.csdn.net/He3he3he/article/details/131649821)
+`PoseOptimization`主要的作用是利用**重投影**优化**单帧的位姿**，主要用在`Tracking`的几种跟踪模式`TrackWithMotionModel`、`TrackReferenceKeyFrame`、 `TrackLocalMap`、`Relocalization`中
+![](https://img-blog.csdnimg.cn/42ae5eb09cab453abc35493835d222f3.png)
+
+### 输入  
+| 优化变量 |              | 观测         |
+| :------- | :----------- | :----------- |
+| 帧的Pose | 帧的MapPoint | 帧的KeyPoint |
+### 初始化  
+```cpp  
+	//创建优化器  
+    g2o::SparseOptimizer optimizer;  
+    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
+
+	//创建线性求解器
+    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
+	//创建块求解器 6 位姿 3 地图点
+    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
+
+	//设置优化算法
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+```
+### 设置vertex
+* VertexSE3Expmap
+	* 设置**估计值**：$T_{cw}$
+	* 设置Id
+	* 是否固定：**False**
+```cpp
+    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+    Sophus::SE3<float> Tcw = pFrame->GetPose();
+    //需要将Tcw转换为SE3Quat
+    vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
+    vSE3->setId(0);
+    vSE3->setFixed(false);
+    optimizer.addVertex(vSE3);
+```
+##### VertexSE3Expmap
+| 优化变量 | 类型      | 维度 |
+| :------- | :-------- | :--- |
+| $T_{cw}$ | `SE3Quat` | 6    |
+* `VertexSE3Expmap`：SE3类型顶点在内部用变换矩阵参数化，在外部用指数映射参数化
+* `SE3Quat`用**四元数**表示旋转，在更新时将**6维的前3维**通过李群李代数进行指数映射为旋转矩阵，然后再转换为四元数，内部操作采用四元数
+* 更新：
+$$
+ \tilde{T}_{cw} = \mathbf{Exp}{\delta\vec{\phi}}\cdot T_{cw}
+$$
+```cpp
+// 6维，类型SE3Quat
+class  VertexSE3Expmap : public BaseVertex<6, SE3Quat>{  
+public:  
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW  
+  
+  VertexSE3Expmap();  
+  
+  bool read(std::istream& is);  
+  
+  bool write(std::ostream& os) const;  
+  
+  virtual void setToOriginImpl() {  
+    _estimate = SE3Quat();  
+  }  
+  
+  virtual void oplusImpl(const double* update_)  { 
+	  //获得delta 
+    Eigen::Map<const Vector6d> update(update_);  
+    // 更新，指数映射，设置估计值
+    setEstimate(SE3Quat::exp(update)*estimate());  
+  }  
+};
+```
+### 设置edge
+对于每一对**地图点-特征点**添加重投影残差边：
+* [EdgeSE3ProjectXYZOnlyPose](ORB_SLAM3_G2oType.md#EdgeSE3ProjectXYZOnlyPose)
+	* 设置vertex：`g2o::VertexSE3Expmap`
+	* 设置观测**obs**：`keyPoint`
+	* 设置**信息矩阵**
+	* 设置**鲁棒核函数**：huber核
+	* 设置huber核的的δ
+	* 设置**相机内参**
+	* 设置**地图点**
+```cpp
+	Eigen::Matrix<double,2,1> obs;  
+	const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];  
+	obs << kpUn.pt.x, kpUn.pt.y;
+
+	// 新建节点，只优化位姿  
+   ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose* e = new ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose();
+
+	//设置vertex和观测
+   e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));  
+   e->setMeasurement(obs);  
+
+	//设置信息矩阵
+	const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];  
+	e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+
+	//设置huber核函数
+	g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;  
+	e->setRobustKernel(rk);  
+	rk->setDelta(deltaMono);
+
+	//设置相机内参
+	e->pCamera = pFrame->mpCamera;  
+	//设置地图点
+	cv::Mat Xw = pMP->GetWorldPos();  
+	e->Xw[0] = Xw.at<float>(0);  
+	e->Xw[1] = Xw.at<float>(1);  
+	e->Xw[2] = Xw.at<float>(2);
+  
+   optimizer.addEdge(e);
+```
+##### EdgeSE3ProjectXYZOnlyPose
+* 属性：**一元边**
+* 观测：$p=\left(u,v\right)$
+* 优化变量：$T_{cw}$
+* 残差：$err = p-\pi \left(T_{cw} \cdot P_{w}\right)$
+
+```cpp
+// 2 观测的维度
+// Eigen::Vector2d 观测的类型
+// g2o::VertexSE3Expmap vertex的类型
+class  EdgeSE3ProjectXYZOnlyPose: public  g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap>{  
+public:  
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW  
+  
+    EdgeSE3ProjectXYZOnlyPose(){}  
+  
+    bool read(std::istream& is);  
+  
+    bool write(std::ostream& os) const;  
+  
+    void computeError()  {  
+	    //获取顶点
+        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
+        //获取观测
+        Eigen::Vector2d obs(_measurement);  
+        //计算残差
+        _error = obs-pCamera->project(v1->estimate().map(Xw));  
+    }  
+  
+    bool isDepthPositive() {  
+        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
+        return (v1->estimate().map(Xw))(2)>0.0;  
+    }  
+  
+  
+    virtual void linearizeOplus();  
+  
+    Eigen::Vector3d Xw;  //地图点
+    GeometricCamera* pCamera;  //相机模型
+};
+```
+
+* jacobian
+$$
+\frac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}_{C}} \frac{\partial \boldsymbol{P}_{C}}{\partial \delta \boldsymbol{\xi}}
+$$
+其中：
+$$
+\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}^{C}}=-\left(\begin{array}{lll}
+\frac{\partial u_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Z^{C}} \\
+\frac{\partial v_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Z^{C}}
+\end{array}\right)=-\left(\begin{array}{ccc}
+\frac{f_{z}}{Z^{C}} & 0 & -\frac{f_{x} X^{C}}{\left(Z^{C}\right)^{2}} \\
+0 & \frac{f_{y}}{Z^{C}} & -\frac{f_{y} Y^{C}}{\left(Z^{C}\right)^{2}}
+\end{array}\right)
+$$
+
+$$
+\frac{\partial \boldsymbol{P}^{C}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)}{\partial \delta \boldsymbol{\xi}}=\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)^{\odot}
+=\begin{bmatrix}
+ I &\left(\boldsymbol{P}^{W}\right)^{\wedge}
+\end{bmatrix}
+$$
+```cpp
+void EdgeSE3ProjectXYZOnlyPose::linearizeOplus() {  
+    g2o::VertexSE3Expmap * vi = static_cast<g2o::VertexSE3Expmap *>(_vertices[0]);  
+    Eigen::Vector3d xyz_trans = vi->estimate().map(Xw);  
+  
+    double x = xyz_trans[0];  
+    double y = xyz_trans[1];  
+    double z = xyz_trans[2];  
+  
+    Eigen::Matrix<double,3,6> SE3deriv;  
+    SE3deriv << 0.f, z,   -y, 1.f, 0.f, 0.f,  
+                 -z , 0.f, x, 0.f, 1.f, 0.f,  
+                 y ,  -x , 0.f, 0.f, 0.f, 1.f;  
+  
+    _jacobianOplusXi = -pCamera->projectJac(xyz_trans) * SE3deriv;  
+}
+```
+### 优化策略
+* 分4次优化，每次迭代10次
+* 每次优化，评估每条重投影边的残差
+	* 如果大于阈值，设置为`level = 1`，不再参与优化
+	* 如果小于阈值，设置为`level = 0`
+* 从第**3**次开始，不再使用鲁棒核函数`e->setRobustKernel(0)`
+### 恢复
+```cpp
+g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));  
+g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();  
+cv::Mat pose = Converter::toCvMat(SE3quat_recov);  
+pFrame->SetPose(pose);
+```
 ## PoseInertialOptimizationLastFrame
 `PoseInertialOptimizationLastKeyFrame`主要的作用是利用上一关键帧和当前关键帧的视觉以及IMU信息来优化当前帧的位姿，主要用在`Tracking`的`TrackLocalMap`
 ![在这里插入图片描述](https://img-blog.csdnimg.cn/5dac29f2628c4571bcd5b239c33626f6.png)
@@ -5940,78 +6478,6 @@ Vector6d b;
 b << VG->estimate(), VA->estimate();  
 //给当前帧设置优化后的bg，ba  
 pFrame->mImuBias = IMU::Bias(b[3],b[4],b[5],b[0],b[1],b[2]);
-```
-## 4.更新当前帧地图点实际被观测到次数
-```cpp
-    for(int i=0; i<mCurrentFrame.N; i++)
-    {
-        if(mCurrentFrame.mvpMapPoints[i])
-        {
-            //如果该地图点不为外点
-            if(!mCurrentFrame.mvbOutlier[i])
-            {
-                // 真正找到该点的帧数mnFound 加 1
-                mCurrentFrame.mvpMapPoints[i]->IncreaseFound();
-                // 查看当前是否是在纯定位过程
-                if(!mbOnlyTracking)
-                {
-                    // 如果该地图点被相机观测数目nObs大于0，匹配内点计数+1
-                    // nObs： 被观测到的相机数目，单目+1，双目或RGB-D则+2
-                    if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
-                        mnMatchesInliers++;
-                }
-                else
-                    // 记录当前帧跟踪到的地图点数目，用于统计跟踪效果
-                    mnMatchesInliers++;
-            }
-            // 如果这个地图点是外点,并且当前相机输入还是双目的时候,就删除这个点
-            // 原因分析：因为双目本身可以左右互匹配，删掉无所谓
-            else if(mSensor==System::STEREO)
-                mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
-        }
-    }
-```
-## 5.判断跟踪是否成功
-```cpp
-    // Decide if the tracking was succesful
-    // More restrictive if there was a relocalization recently
-    mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
-    // Step 5：根据跟踪匹配数目及重定位情况决定是否跟踪成功
-    // 如果最近刚刚发生了重定位,那么至少成功匹配50个点才认为是成功跟踪
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
-        return false;
-
-    // RECENTLY_LOST状态下，至少成功跟踪10个才算成功
-    if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
-        return true;
-
-    // 单目IMU模式下做完初始化至少成功跟踪15个才算成功，没做初始化需要50个
-    if (mSensor == System::IMU_MONOCULAR)
-    {
-        if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
-        {
-            return false;
-        }
-        else
-            return true;
-    }
-    else if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
-    {
-        if(mnMatchesInliers<15)
-        {
-            return false;
-        }
-        else
-            return true;
-    }
-    else
-    {
-        //以上情况都不满足，只要跟踪的地图点大于30个就认为成功了
-        if(mnMatchesInliers<30)
-            return false;
-        else
-            return true;
-    }
 ```
 
 
