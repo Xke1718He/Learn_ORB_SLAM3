@@ -3205,28 +3205,21 @@ T_{lw} = T_{lr}\cdot T_{rw}
 $$
 ```cpp
     // Update pose according to reference keyframe
-    // Step 1：利用参考关键帧更新上一帧在世界坐标系下的位姿
-    // 上一普通帧的参考关键帧，注意这里用的是参考关键帧（位姿准）而不是上上一帧的普通帧
     KeyFrame* pRef = mLastFrame.mpReferenceKF;
-    // ref_keyframe 到 lastframe的位姿变换
     Sophus::SE3f Tlr = mlRelativeFramePoses.back();
-    // 将上一帧的世界坐标系下的位姿计算出来
-    // l:last, r:reference, w:world
-    // Tlw = Tlr*Trw 
     mLastFrame.SetPose(Tlr * pRef->GetPose());
 ```
 对于**双目**或**RGBD**，为上一帧生成新的**临时地图点，主要是为了生成更多的匹配，让跟踪更好**
 * 临时地图点：对于**上一帧**中具有有效深度值`z>0`的特征点，如果这个**特征点**在**上一帧**中**没有**对应的地图点，或者创建后**没有被观测到**，添加为临时地图点
+  * 跟踪OK后，在创建新的关键帧前将临时地图点`mlpTemporalPoints`全部删除
 * 临时地图点也不是越多越好，当满足下面两个条件停止添加：
 	* 当前的点的深度已经超过了设定的深度阈值(**35倍基线**)，主要太远了不可靠
-	* 临时地图点已超过`100`个点，说明距离比较远了，可能不准确，这里是从近的开始添加
+	* **具有有效深度的点**已超过`100`个点，说明距离比较远了，可能不准确，这里是从近的开始添加
 
 ```cpp
-    // Step 2：对于双目或rgbd相机，为上一帧生成新的临时地图点
-    // 注意这些地图点只是用来跟踪，不加入到地图中，跟踪完后会删除
+
     // Create "visual odometry" MapPoints
     // We sort points according to their measured depth by the stereo/RGB-D sensor
-    // Step 2.1：得到上一帧中具有有效深度值的特征点（不一定是地图点）
     vector<pair<float,int> > vDepthIdx;
     const int Nfeat = mLastFrame.Nleft == -1? mLastFrame.N : mLastFrame.Nleft;
     vDepthIdx.reserve(Nfeat);
@@ -3235,11 +3228,10 @@ $$
         float z = mLastFrame.mvDepth[i];
         if(z>0)
         {
-            // vDepthIdx第一个元素是某个点的深度,第二个元素是对应的特征点id
             vDepthIdx.push_back(make_pair(z,i));
         }
     }
-    // 如果上一帧中没有有效深度的点,那么就直接退出
+
     if(vDepthIdx.empty())
         return;
 
@@ -3248,27 +3240,21 @@ $$
 
     // We insert all close points (depth<mThDepth)
     // If less than 100 close points, we insert the 100 closest ones.
-    // Step 2.2：从中找出不是地图点的部分
     int nPoints = 0;
     for(size_t j=0; j<vDepthIdx.size();j++)
     {
         int i = vDepthIdx[j].second;
-
         bool bCreateNew = false;
 
-        // 如果这个点对应在上一帧中的地图点没有,或者创建后就没有被观测到,那么就生成一个临时的地图点
         MapPoint* pMP = mLastFrame.mvpMapPoints[i];
 
         if(!pMP)
             bCreateNew = true;
         else if(pMP->Observations()<1)
-            // 地图点被创建后就没有被观测，认为不靠谱，也需要重新创建
             bCreateNew = true;
 
         if(bCreateNew)
         {
-            // Step 2.3：需要创建的点，包装为地图点。只是为了提高双目和RGBD的跟踪成功率，并没有添加复杂属性，因为后面会扔掉
-            // 反投影到世界坐标系中
             Eigen::Vector3f x3D;
 
             if(mLastFrame.Nleft == -1){
@@ -3278,24 +3264,15 @@ $$
                 x3D = mLastFrame.UnprojectStereoFishEye(i);
             }
 
-            // 加入上一帧的地图点中
             MapPoint* pNewMP = new MapPoint(x3D,mpAtlas->GetCurrentMap(),&mLastFrame,i);
             mLastFrame.mvpMapPoints[i]=pNewMP;
-
-            // 标记为临时添加的MapPoint，之后在CreateNewKeyFrame之前会全部删除
             mlpTemporalPoints.push_back(pNewMP);
             nPoints++;
         }
         else
         {
-            // 因为从近到远排序，记录其中不需要创建地图点的个数
             nPoints++;
         }
-
-        // Step 2.4：如果地图点质量不好，停止创建地图点
-        // 停止新增临时地图点必须同时满足以下条件：
-        // 1、当前的点的深度已经超过了设定的深度阈值（35倍基线）
-        // 2、nPoints已经超过100个点，说明距离比较远了，可能不准确，停掉退出
         if(vDepthIdx[j].first>mThDepth && nPoints>100)
             break;
 
@@ -3309,8 +3286,8 @@ $$
 * `mpLastKeyFrame`：上一关键帧存在
 
 于是有两种情况：
-* 如果地图更新了，且上一关键帧存在，则用关键帧来进行预测`mpImuPreintegratedFromLastKF`
-* 如果地图未更新，则用上一帧来进行预测`mpImuPreintegratedFrame`
+* 如果地图更新了，且**上一关键帧**存在，则用关键帧来进行预测`mpImuPreintegratedFromLastKF`
+* 如果地图未更新，则用**上一帧**来进行预测`mpImuPreintegratedFrame`
 
 
 首先，根据`mpImuPreintegratedFromLastKF`或`mpImuPreintegratedFrame`得到$R_{b_{1}b_{2}}$、$v_{b_{1}b_{2}}$、$p_{b_{1}b_{2}}$
@@ -3333,8 +3310,6 @@ Eigen::Matrix3f Preintegrated::GetDeltaRotation(const Bias &b_)
     // 计算偏置的变化量
     Eigen::Vector3f dbg;
     dbg << b_.bwx - b.bwx, b_.bwy - b.bwy, b_.bwz - b.bwz;
-    // 考虑偏置后，dR对偏置线性化的近似求解,邱笑晨《预积分总结与公式推导》P13～P14
-    // Forster论文公式（44）yP17也有结果（但没有推导），后面两个函数GetDeltaPosition和GetDeltaPosition也是基于此推导的
     return NormalizeRotation(dR * Sophus::SO3f::exp(JRg * dbg).matrix());
 }
 
@@ -3349,7 +3324,6 @@ Eigen::Vector3f Preintegrated::GetDeltaPosition(const Bias &b_)
     Eigen::Vector3f dbg, dba;
     dbg << b_.bwx - b.bwx, b_.bwy - b.bwy, b_.bwz - b.bwz;
     dba << b_.bax - b.bax, b_.bay - b.bay, b_.baz - b.baz;
-    // 考虑偏置后，dP对偏置线性化的近似求解,邱笑晨《预积分总结与公式推导》P13，JPg和JPa在预积分处理中更新
     return dP + JPg * dbg + JPa * dba;
 }
 
@@ -3364,7 +3338,6 @@ Eigen::Vector3f Preintegrated::GetDeltaVelocity(const Bias &b_)
     Eigen::Vector3f dbg, dba;
     dbg << b_.bwx - b.bwx, b_.bwy - b.bwy, b_.bwz - b.bwz;
     dba << b_.bax - b.bax, b_.bay - b.bay, b_.baz - b.baz;
-    // 考虑偏置后，dV对偏置线性化的近似求解,邱笑晨《预积分总结与公式推导》P13，JPg和JPa在预积分处理中更新 
     return dV + JVg * dbg + JVa * dba;
 }
 ```
@@ -3385,7 +3358,6 @@ $$
         const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
         const float t12 = mpImuPreintegratedFromLastKF->dT;
 
-        // 计算当前帧在世界坐标系的位姿,原理都是用预积分的位姿（预积分的值不会变化）与上一帧的位姿（会迭代变化）进行更新 
         // 旋转 R_wb2 = R_wb1 * R_b1b2
         Eigen::Matrix3f Rwb2 = IMU::NormalizeRotation(Rwb1 * mpImuPreintegratedFromLastKF->GetDeltaRotation(mpLastKeyFrame->GetImuBias()));
         // 位移
@@ -3456,10 +3428,61 @@ $$
 $$
 T_{cw} = T_{cl}\cdot T_{lw}
 $$
-然后，基于**投影的匹配搜索**[SearchByProjection](##SearchByProjection(TrackWithMotionModel))获得上一帧与当前帧的匹配关系
+```cpp
+mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+```
+
+
+
+然后，基于**投影的匹配搜索**[SearchByProjection](##SearchByProjection(TrackWithMotionModel))获得上一帧与当前帧的匹配关系，如果匹配太少`<20`，则会**扩大搜索窗口**
+
+```cpp
+    fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+
+    // Project points seen in previous frame
+    int th;
+
+    if(mSensor==System::STEREO)
+        th=7;
+    else
+        th=15;
+
+    int nmatches = matcher.SearchByProjection(
+        mCurrentFrame,
+        mLastFrame,
+        th,
+        mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR
+    );
+
+    // If few matches, uses a wider window search
+    if(nmatches<20)
+    {
+        fill(
+            mCurrentFrame.mvpMapPoints.begin(),
+            mCurrentFrame.mvpMapPoints.end(),
+            static_cast<MapPoint*>(NULL)
+        );
+
+        nmatches = matcher.SearchByProjection(
+            mCurrentFrame,
+            mLastFrame,
+            2*th,
+            mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR
+        );
+    }
+```
+
+
 
 ## 3.位姿优化
 得到上一帧与当前帧的匹配关系后，利用`3D-2D`投影关系优化当前帧位姿[PoseOptimization](##PoseOptimization)
+
+```cpp
+Optimizer::PoseOptimization(&mCurrentFrame);
+```
+
+
+
 ## 4.剔除当前帧中地图点中的外点
 ```cpp
     int nmatchesMap = 0;
@@ -3877,11 +3900,8 @@ void Tracking::UpdateLocalPoints()
             }
             else
             {
-                // 更新能观测到该点的帧数加1(被当前帧观测了)
                 pMP->IncreaseVisible();
-                // 标记该点被当前帧观测到
                 pMP->mnLastFrameSeen = mCurrentFrame.mnId;
-                // 标记该点在后面搜索匹配时不被投影，因为已经有匹配了
                 pMP->mbTrackInView = false;
                 pMP->mbTrackInViewR = false;
             }
@@ -3890,7 +3910,7 @@ void Tracking::UpdateLocalPoints()
 ```
 2. 对于局部地图中的地图点，判断是否在当前帧的视野范围内
 ```cpp
-    // Step 2：判断所有局部地图点中除当前帧地图点外的点，是否在当前帧视野范围内
+
     for(vector<MapPoint*>::iterator vit=mvpLocalMapPoints.begin(), vend=mvpLocalMapPoints.end(); vit!=vend; vit++)
     {
         MapPoint* pMP = *vit;
@@ -3902,12 +3922,10 @@ void Tracking::UpdateLocalPoints()
         if(pMP->isBad())
             continue;
         // Project (this fills MapPoint variables for matching)
-        // 判断地图点是否在在当前帧视野内
         if(mCurrentFrame.isInFrustum(pMP,0.5))
         {
             // 观测到该点的帧数加1
             pMP->IncreaseVisible();
-            // 只有在视野范围内的地图点才参与之后的投影匹配
             nToMatch++;
         }
         if(pMP->mbTrackInView)
@@ -4063,7 +4081,7 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
     {
         ORBmatcher matcher(0.8);
         int th = 1;
-        if(mSensor==System::RGBD || mSensor==System::IMU_RGBD)  // RGBD相机输入的时候,搜索的阈值会变得稍微大一些
+        if(mSensor==System::RGBD || mSensor==System::IMU_RGBD)
             th=3;
         if(mpAtlas->isImuInitialized())
         {
@@ -4090,7 +4108,7 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
 ```
 ## 3.位姿优化
 优化分为两种情况：
-* IMU未初始化 或者 刚刚重定位：[PoseOptimization](##PoseOptimization)
+* IMU未初始化 或者 初始化了但是刚刚重定位：[PoseOptimization](##PoseOptimization)
 * 其他情况：[PoseInertialOptimizationLastFrame](##PoseInertialOptimizationLastFrame)或者`PoseInertialOptimizationLastKeyFrame`
 ```cpp
     // Step 3：前面新增了更多的匹配关系，BA优化得到更准确的位姿
@@ -4498,15 +4516,16 @@ vector<KeyFrame *> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F, Ma
 | windowSize                                                                                                                                                                                         | 搜索窗口大小         |  
 
 其组件包括：搜索窗口、重复匹配过滤、最佳描述子距离、最优与次优比值、旋转直方图
+
+```cpp
+int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f> &vbPrevMatched, vector<int> &vnMatches12, int windowSize)
+```
+
 ### 1.旋转直方图的构建
 ```cpp
-        // Step 1 构建旋转直方图，HISTO_LENGTH = 30
-        vector<int> rotHist[HISTO_LENGTH];
-        // 每个bin里预分配500个，因为使用的是vector不够的话可以自动扩展容量
+		vector<int> rotHist[HISTO_LENGTH];
         for(int i=0;i<HISTO_LENGTH;i++)
             rotHist[i].reserve(500);
-        //! 原作者代码是 const float factor = 1.0f/HISTO_LENGTH; 是错误的，更改为下面代码
-        // const float factor = HISTO_LENGTH/360.0f;
         const float factor = 1.0f/HISTO_LENGTH;
 ```
 ### 2.搜索候选匹配点
@@ -5355,7 +5374,7 @@ int ORBmatcher::SearchByBoW(
 | $T_{cw}$ | `SE3Quat` | 6    |
 * `VertexSE3Expmap`：SE3类型顶点在内部用变换矩阵参数化，在外部用指数映射参数化
 * `SE3Quat`用**四元数**表示旋转，在更新时将**6维的前3维**通过李群李代数进行指数映射为旋转矩阵，然后再转换为四元数，内部操作采用四元数
-* 更新：
+* 更新`oplusImpl`：
 $$
  \tilde{T}_{cw} = \mathbf{Exp}{\delta\vec{\phi}}\cdot T_{cw}
 $$
@@ -5384,205 +5403,8 @@ public:
 };
 ```
 
-
 ### IMU
 
-### 重力
-
-### 尺度
-
-### Sim3
-
-## Edge
-### 重投影
-#### EdgeSE3ProjectXYZOnlyPose
-* 属性：**一元边**
-* 观测：$p=\left(u,v\right)$
-* 优化变量：$T_{cw}$
-* 残差：$err = p-\pi \left(T_{cw} \cdot P_{w}\right)$
-
-```cpp
-// 2 观测的维度
-// Eigen::Vector2d 观测的类型
-// g2o::VertexSE3Expmap vertex的类型
-class  EdgeSE3ProjectXYZOnlyPose: public  g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap>{  
-public:  
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW  
-  
-    EdgeSE3ProjectXYZOnlyPose(){}  
-  
-    bool read(std::istream& is);  
-  
-    bool write(std::ostream& os) const;  
-  
-    void computeError()  {  
-	    //获取顶点
-        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
-        //获取观测
-        Eigen::Vector2d obs(_measurement);  
-        //计算残差
-        _error = obs-pCamera->project(v1->estimate().map(Xw));  
-    }  
-  
-    bool isDepthPositive() {  
-        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
-        return (v1->estimate().map(Xw))(2)>0.0;  
-    }  
-  
-  
-    virtual void linearizeOplus();  
-  
-    Eigen::Vector3d Xw;  //地图点
-    GeometricCamera* pCamera;  //相机模型
-};
-```
-
-* jacobian
-$$
-\frac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}_{C}} \frac{\partial \boldsymbol{P}_{C}}{\partial \delta \boldsymbol{\xi}}
-$$
-其中：
-$$
-\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}^{C}}=-\left(\begin{array}{lll}
-\frac{\partial u_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Z^{C}} \\
-\frac{\partial v_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Z^{C}}
-\end{array}\right)=-\left(\begin{array}{ccc}
-\frac{f_{z}}{Z^{C}} & 0 & -\frac{f_{x} X^{C}}{\left(Z^{C}\right)^{2}} \\
-0 & \frac{f_{y}}{Z^{C}} & -\frac{f_{y} Y^{C}}{\left(Z^{C}\right)^{2}}
-\end{array}\right)
-$$
-
-$$
-\frac{\partial \boldsymbol{P}^{C}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)}{\partial \delta \boldsymbol{\xi}}=\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)^{\odot}
-=\begin{bmatrix}
- I &\left(\boldsymbol{P}^{W}\right)^{\wedge}
-\end{bmatrix}
-$$
-```cpp
-void EdgeSE3ProjectXYZOnlyPose::linearizeOplus() {  
-    g2o::VertexSE3Expmap * vi = static_cast<g2o::VertexSE3Expmap *>(_vertices[0]);  
-    Eigen::Vector3d xyz_trans = vi->estimate().map(Xw);  
-  
-    double x = xyz_trans[0];  
-    double y = xyz_trans[1];  
-    double z = xyz_trans[2];  
-  
-    Eigen::Matrix<double,3,6> SE3deriv;  
-    SE3deriv << 0.f, z,   -y, 1.f, 0.f, 0.f,  
-                 -z , 0.f, x, 0.f, 1.f, 0.f,  
-                 y ,  -x , 0.f, 0.f, 0.f, 1.f;  
-  
-    _jacobianOplusXi = -pCamera->projectJac(xyz_trans) * SE3deriv;  
-}
-```
-
-
-## PoseOptimization
-
-`PoseOptimization`主要的作用是利用**重投影**优化**单帧的位姿**，主要用在`Tracking`的几种跟踪模式`TrackWithMotionModel`、`TrackReferenceKeyFrame`、 `TrackLocalMap`、`Relocalization`中
-![](https://img-blog.csdnimg.cn/42ae5eb09cab453abc35493835d222f3.png)
-
-### 输入  
-| 优化变量 |              | 观测         |
-| :------- | :----------- | :----------- |
-| 帧的Pose | 帧的MapPoint | 帧的KeyPoint |
-### 初始化  
-```cpp  
-	//创建优化器  
-    g2o::SparseOptimizer optimizer;  
-    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
-
-	//创建线性求解器
-    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
-	//创建块求解器 6 位姿 3 地图点
-    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
-
-	//设置优化算法
-    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
-    optimizer.setAlgorithm(solver);
-```
-### 设置vertex
-* VertexSE3Expmap
-	* 设置**估计值**：$T_{cw}$
-	* 设置Id
-	* 是否固定：**False**
-```cpp
-    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
-    Sophus::SE3<float> Tcw = pFrame->GetPose();
-    //需要将Tcw转换为SE3Quat
-    vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
-    vSE3->setId(0);
-    vSE3->setFixed(false);
-    optimizer.addVertex(vSE3);
-```
-
-### 设置edge
-对于每一对**地图点-特征点**添加重投影残差边：
-* [EdgeSE3ProjectXYZOnlyPose](ORB_SLAM3_G2oType.md#EdgeSE3ProjectXYZOnlyPose)
-	* 设置vertex：`g2o::VertexSE3Expmap`
-	* 设置观测**obs**：`keyPoint`
-	* 设置**信息矩阵**
-	* 设置**鲁棒核函数**：huber核
-	* 设置huber核的的δ
-	* 设置**相机内参**
-	* 设置**地图点**
-```cpp
-	Eigen::Matrix<double,2,1> obs;  
-	const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];  
-	obs << kpUn.pt.x, kpUn.pt.y;
-
-	// 新建节点，只优化位姿  
-   ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose* e = new ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose();
-
-	//设置vertex和观测
-   e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));  
-   e->setMeasurement(obs);  
-
-	//设置信息矩阵
-	const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];  
-	e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
-
-	//设置huber核函数
-	g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;  
-	e->setRobustKernel(rk);  
-	rk->setDelta(deltaMono);
-
-	//设置相机内参
-	e->pCamera = pFrame->mpCamera;  
-	//设置地图点
-	cv::Mat Xw = pMP->GetWorldPos();  
-	e->Xw[0] = Xw.at<float>(0);  
-	e->Xw[1] = Xw.at<float>(1);  
-	e->Xw[2] = Xw.at<float>(2);
-  
-   optimizer.addEdge(e);
-```
-
-### 优化策略
-* 分4次优化，每次迭代10次
-* 每次优化，评估每条重投影边的残差
-	* 如果大于阈值，设置为`level = 1`，不再参与优化
-	* 如果小于阈值，设置为`level = 0`
-* 从第**3**次开始，不再使用鲁棒核函数`e->setRobustKernel(0)`
-### 恢复
-```cpp
-g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));  
-g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();  
-cv::Mat pose = Converter::toCvMat(SE3quat_recov);  
-pFrame->SetPose(pose);
-```
-## PoseInertialOptimizationLastFrame
-`PoseInertialOptimizationLastKeyFrame`主要的作用是利用上一关键帧和当前关键帧的视觉以及IMU信息来优化当前帧的位姿，主要用在`Tracking`的`TrackLocalMap`
-![在这里插入图片描述](https://img-blog.csdnimg.cn/5dac29f2628c4571bcd5b239c33626f6.png)
-### 输入
-|  优化变量         | fixed           |         |
-|:--------------|:----------------|:--------|
-|  当前帧的$T_{wb}$ | 上一关键帧的$T_{wb}$  | 当前帧的地图点 |
-| 当前帧的$b_{a}$   | 上一关键帧的$b_{a}$   |         |
-| 当前帧的$b_{g}$   | 上一关键帧的$b_{g}$   |         |
-|  当前帧的速度v       | 上一关键帧的速度v        |         |  
-
-### 几种Vertex
 #### 1.VertexPose
 * 类型：`ImuCamPose`
 * 维度：6（3旋转+3平移）
@@ -5780,7 +5602,100 @@ public:
     }  
 };
 ```
-### 几种边
+
+### 重力
+
+### 尺度
+
+### Sim3
+
+## Edge
+### 重投影
+#### EdgeSE3ProjectXYZOnlyPose
+
+`EdgeSE3ProjectXYZOnlyPose`为一元边
+
+| 成员               | 说明                                          | 类型                   |
+| ------------------ | --------------------------------------------- | ---------------------- |
+| 顶点`_vertices`    | $T_{cw}$                                      | `g2o::VertexSE3Expmap` |
+| 观测`_measurement` | $p=\left(u,v\right)$                          | `Eigen::Vector2d`      |
+| 残差`_error`       | $err = p-\pi \left(T_{cw} \cdot P_{w}\right)$ | `Eigen::Vector2d`      |
+
+```cpp
+// 2 观测的维度
+// Eigen::Vector2d 观测的类型
+// g2o::VertexSE3Expmap vertex的类型
+class  EdgeSE3ProjectXYZOnlyPose: public  g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap>{  
+public:  
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW  
+  
+    EdgeSE3ProjectXYZOnlyPose(){}  
+  
+    bool read(std::istream& is);  
+  
+    bool write(std::ostream& os) const;  
+  
+    void computeError()  {  
+	    //获取顶点
+        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
+        //获取观测
+        Eigen::Vector2d obs(_measurement);  
+        //计算残差
+        _error = obs-pCamera->project(v1->estimate().map(Xw));  
+    }  
+  
+    bool isDepthPositive() {  
+        const g2o::VertexSE3Expmap* v1 = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0]);  
+        return (v1->estimate().map(Xw))(2)>0.0;  
+    }  
+  
+  
+    virtual void linearizeOplus();  
+  
+    Eigen::Vector3d Xw;  //地图点
+    GeometricCamera* pCamera;  //相机模型
+};
+```
+
+* jacobian
+$$
+\frac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}_{C}} \frac{\partial \boldsymbol{P}_{C}}{\partial \delta \boldsymbol{\xi}}
+$$
+其中：
+$$
+\frac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}^{C}}=-\left(\begin{array}{lll}
+\frac{\partial u_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial u_{\mathrm{cal}}}{\partial Z^{C}} \\
+\frac{\partial v_{\mathrm{cal}}}{\partial X^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Y^{C}} & \frac{\partial v_{\mathrm{cal}}}{\partial Z^{C}}
+\end{array}\right)=-\left(\begin{array}{ccc}
+\frac{f_{z}}{Z^{C}} & 0 & -\frac{f_{x} X^{C}}{\left(Z^{C}\right)^{2}} \\
+0 & \frac{f_{y}}{Z^{C}} & -\frac{f_{y} Y^{C}}{\left(Z^{C}\right)^{2}}
+\end{array}\right)
+$$
+
+$$
+\frac{\partial \boldsymbol{P}^{C}}{\partial \delta \boldsymbol{\xi}}=\frac{\partial\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)}{\partial \delta \boldsymbol{\xi}}=\left(\boldsymbol{T} \boldsymbol{P}^{W}\right)^{\odot}
+=\begin{bmatrix}
+ I &\left(\boldsymbol{P}^{W}\right)^{\wedge}
+\end{bmatrix}
+$$
+```cpp
+void EdgeSE3ProjectXYZOnlyPose::linearizeOplus() {  
+    g2o::VertexSE3Expmap * vi = static_cast<g2o::VertexSE3Expmap *>(_vertices[0]);  
+    Eigen::Vector3d xyz_trans = vi->estimate().map(Xw);  
+  
+    double x = xyz_trans[0];  
+    double y = xyz_trans[1];  
+    double z = xyz_trans[2];  
+  
+    Eigen::Matrix<double,3,6> SE3deriv;  
+    SE3deriv << 0.f, z,   -y, 1.f, 0.f, 0.f,  
+                 -z , 0.f, x, 0.f, 1.f, 0.f,  
+                 y ,  -x , 0.f, 0.f, 0.f, 1.f;  
+  
+    _jacobianOplusXi = -pCamera->projectJac(xyz_trans) * SE3deriv;  
+}
+```
+### IMU
 #### 1.EdgeMonoOnlyPose
 * 属性：**一元边**
 * 观测：$p$
@@ -6137,6 +6052,112 @@ public:
     }  
 };
 ```
+
+
+## PoseOptimization
+
+`PoseOptimization`主要的作用是利用**重投影**优化**单帧的位姿**，主要用在`Tracking`的几种跟踪模式`TrackWithMotionModel`、`TrackReferenceKeyFrame`、 `TrackLocalMap`、`Relocalization`中
+![](https://img-blog.csdnimg.cn/42ae5eb09cab453abc35493835d222f3.png)
+
+### 输入  
+| 优化变量 |              | 观测         |
+| :------- | :----------- | :----------- |
+| 帧的Pose | 帧的MapPoint | 帧的KeyPoint |
+### 初始化  
+```cpp  
+	//创建优化器  
+    g2o::SparseOptimizer optimizer;  
+    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
+
+	//创建线性求解器
+    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
+	//创建块求解器 6 位姿 3 地图点
+    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
+
+	//设置优化算法
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+```
+### 设置vertex
+* VertexSE3Expmap
+	* 设置**估计值**：$T_{cw}$
+	* 设置Id
+	* 是否固定：**False**
+```cpp
+    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+    Sophus::SE3<float> Tcw = pFrame->GetPose();
+    //需要将Tcw转换为SE3Quat
+    vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
+    vSE3->setId(0);
+    vSE3->setFixed(false);
+    optimizer.addVertex(vSE3);
+```
+
+### 设置edge
+对于每一对**地图点-特征点**添加重投影残差边：
+* [EdgeSE3ProjectXYZOnlyPose](ORB_SLAM3_G2oType.md#EdgeSE3ProjectXYZOnlyPose)
+	* 设置vertex：`g2o::VertexSE3Expmap`
+	* 设置观测**obs**：`keyPoint`
+	* 设置**信息矩阵**
+	* 设置**鲁棒核函数**：huber核
+	* 设置huber核的的δ
+	* 设置**相机内参**
+	* 设置**地图点**
+```cpp
+	Eigen::Matrix<double,2,1> obs;  
+	const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];  
+	obs << kpUn.pt.x, kpUn.pt.y;
+
+	// 新建节点，只优化位姿  
+   ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose* e = new ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose();
+
+	//设置vertex和观测
+   e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));  
+   e->setMeasurement(obs);  
+
+	//设置信息矩阵
+	const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];  
+	e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+
+	//设置huber核函数
+	g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;  
+	e->setRobustKernel(rk);  
+	rk->setDelta(deltaMono);
+
+	//设置相机内参
+	e->pCamera = pFrame->mpCamera;  
+	//设置地图点
+	cv::Mat Xw = pMP->GetWorldPos();  
+	e->Xw[0] = Xw.at<float>(0);  
+	e->Xw[1] = Xw.at<float>(1);  
+	e->Xw[2] = Xw.at<float>(2);
+  
+   optimizer.addEdge(e);
+```
+
+### 优化策略
+* 分4次优化，每次迭代10次
+* 每次优化，评估每条重投影边的残差
+	* 如果大于阈值，设置为`level = 1`，不再参与优化
+	* 如果小于阈值，设置为`level = 0`
+* 从第**3**次开始，不再使用鲁棒核函数`e->setRobustKernel(0)`
+### 恢复
+```cpp
+g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));  
+g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();  
+cv::Mat pose = Converter::toCvMat(SE3quat_recov);  
+pFrame->SetPose(pose);
+```
+## PoseInertialOptimizationLastFrame
+`PoseInertialOptimizationLastKeyFrame`主要的作用是利用上一关键帧和当前关键帧的视觉以及IMU信息来优化当前帧的位姿，主要用在`Tracking`的`TrackLocalMap`
+![在这里插入图片描述](https://img-blog.csdnimg.cn/5dac29f2628c4571bcd5b239c33626f6.png)
+### 输入
+|  优化变量         | fixed           |         |
+|:--------------|:----------------|:--------|
+|  当前帧的$T_{wb}$ | 上一关键帧的$T_{wb}$  | 当前帧的地图点 |
+| 当前帧的$b_{a}$   | 上一关键帧的$b_{a}$   |         |
+| 当前帧的$b_{g}$   | 上一关键帧的$b_{g}$   |         |
+|  当前帧的速度v       | 上一关键帧的速度v        |         |  
 ### 步骤一：初始化
 ```cpp
 g2o::SparseOptimizer optimizer;  
