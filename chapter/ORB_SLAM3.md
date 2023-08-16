@@ -3458,7 +3458,7 @@ T_{cw} = T_{cl}\cdot T_{lw}
 $$
 然后，基于**投影的匹配搜索**[SearchByProjection](##SearchByProjection(TrackWithMotionModel))获得上一帧与当前帧的匹配关系
 
-## 3.优化
+## 3.位姿优化
 得到上一帧与当前帧的匹配关系后，利用`3D-2D`投影关系优化当前帧位姿[PoseOptimization](##PoseOptimization)
 ## 4.剔除当前帧中地图点中的外点
 ```cpp
@@ -3577,7 +3577,7 @@ void TemplatedVocabulary<TDescriptor,F>::transform(const TDescriptor &feature,
     mCurrentFrame.mvpMapPoints = vpMapPointMatches;
     mCurrentFrame.SetPose(mLastFrame.GetPose());  
 ```
-## 4.优化
+## 4.位姿优化
 
 通过[PoseOptimization](##PoseOptimization)最小化重投影误差优化当前帧位姿
 
@@ -4088,7 +4088,7 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
         int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
     }
 ```
-## 3.优化
+## 3.位姿优化
 优化分为两种情况：
 * IMU未初始化 或者 刚刚重定位：[PoseOptimization](##PoseOptimization)
 * 其他情况：[PoseInertialOptimizationLastFrame](##PoseInertialOptimizationLastFrame)或者`PoseInertialOptimizationLastKeyFrame`
@@ -4201,7 +4201,7 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
 # Relocalization
 `Relocalization`主要的作用是在**跟踪失败**时，通过词袋在关键帧数据库`KeyFrameDatabase`中寻找和当前帧相似的关键帧作为匹配帧，进而恢复当前帧的位姿
 
-1. 计算当前帧的`Bow`，参考[ORB_SLAM3 TrackReferenceKeyFrame中计算当前帧的描述子的Bow向量](https://blog.csdn.net/He3he3he/article/details/132000817?spm=1001.2014.3001.5502)
+1. 计算当前帧的`Bow`，参考[Bow向量](##1.计算当前帧的描述子的Bow向量)
 ```cpp
 mCurrentFrame.ComputeBoW();
 ```
@@ -5346,44 +5346,10 @@ int ORBmatcher::SearchByBoW(
 ```
 # 优化
 
-## PoseOptimization
-`PoseOptimization`主要的作用是利用**重投影**优化**单帧的位姿**，主要用在`Tracking`的几种跟踪模式`TrackWithMotionModel`、`TrackReferenceKeyFrame`、 `TrackLocalMap`、`Relocalization`中
-![](https://img-blog.csdnimg.cn/42ae5eb09cab453abc35493835d222f3.png)
+## Vertex
 
-### 输入  
-| 优化变量 |              | 观测         |
-| :------- | :----------- | :----------- |
-| 帧的Pose | 帧的MapPoint | 帧的KeyPoint |
-### 初始化  
-```cpp  
-	//创建优化器  
-    g2o::SparseOptimizer optimizer;  
-    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
-
-	//创建线性求解器
-    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
-	//创建块求解器 6 位姿 3 地图点
-    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
-
-	//设置优化算法
-    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
-    optimizer.setAlgorithm(solver);
-```
-### 设置vertex
-* VertexSE3Expmap
-	* 设置**估计值**：$T_{cw}$
-	* 设置Id
-	* 是否固定：**False**
-```cpp
-    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
-    Sophus::SE3<float> Tcw = pFrame->GetPose();
-    //需要将Tcw转换为SE3Quat
-    vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
-    vSE3->setId(0);
-    vSE3->setFixed(false);
-    optimizer.addVertex(vSE3);
-```
-##### VertexSE3Expmap
+### 重投影
+#### VertexSE3Expmap
 | 优化变量 | 类型      | 维度 |
 | :------- | :-------- | :--- |
 | $T_{cw}$ | `SE3Quat` | 6    |
@@ -5417,48 +5383,19 @@ public:
   }  
 };
 ```
-### 设置edge
-对于每一对**地图点-特征点**添加重投影残差边：
-* [EdgeSE3ProjectXYZOnlyPose](ORB_SLAM3_G2oType.md#EdgeSE3ProjectXYZOnlyPose)
-	* 设置vertex：`g2o::VertexSE3Expmap`
-	* 设置观测**obs**：`keyPoint`
-	* 设置**信息矩阵**
-	* 设置**鲁棒核函数**：huber核
-	* 设置huber核的的δ
-	* 设置**相机内参**
-	* 设置**地图点**
-```cpp
-	Eigen::Matrix<double,2,1> obs;  
-	const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];  
-	obs << kpUn.pt.x, kpUn.pt.y;
 
-	// 新建节点，只优化位姿  
-   ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose* e = new ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose();
 
-	//设置vertex和观测
-   e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));  
-   e->setMeasurement(obs);  
+### IMU
 
-	//设置信息矩阵
-	const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];  
-	e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+### 重力
 
-	//设置huber核函数
-	g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;  
-	e->setRobustKernel(rk);  
-	rk->setDelta(deltaMono);
+### 尺度
 
-	//设置相机内参
-	e->pCamera = pFrame->mpCamera;  
-	//设置地图点
-	cv::Mat Xw = pMP->GetWorldPos();  
-	e->Xw[0] = Xw.at<float>(0);  
-	e->Xw[1] = Xw.at<float>(1);  
-	e->Xw[2] = Xw.at<float>(2);
-  
-   optimizer.addEdge(e);
-```
-##### EdgeSE3ProjectXYZOnlyPose
+### Sim3
+
+## Edge
+### 重投影
+#### EdgeSE3ProjectXYZOnlyPose
 * 属性：**一元边**
 * 观测：$p=\left(u,v\right)$
 * 优化变量：$T_{cw}$
@@ -5538,6 +5475,89 @@ void EdgeSE3ProjectXYZOnlyPose::linearizeOplus() {
     _jacobianOplusXi = -pCamera->projectJac(xyz_trans) * SE3deriv;  
 }
 ```
+
+
+## PoseOptimization
+
+`PoseOptimization`主要的作用是利用**重投影**优化**单帧的位姿**，主要用在`Tracking`的几种跟踪模式`TrackWithMotionModel`、`TrackReferenceKeyFrame`、 `TrackLocalMap`、`Relocalization`中
+![](https://img-blog.csdnimg.cn/42ae5eb09cab453abc35493835d222f3.png)
+
+### 输入  
+| 优化变量 |              | 观测         |
+| :------- | :----------- | :----------- |
+| 帧的Pose | 帧的MapPoint | 帧的KeyPoint |
+### 初始化  
+```cpp  
+	//创建优化器  
+    g2o::SparseOptimizer optimizer;  
+    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
+
+	//创建线性求解器
+    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
+	//创建块求解器 6 位姿 3 地图点
+    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
+
+	//设置优化算法
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+```
+### 设置vertex
+* VertexSE3Expmap
+	* 设置**估计值**：$T_{cw}$
+	* 设置Id
+	* 是否固定：**False**
+```cpp
+    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+    Sophus::SE3<float> Tcw = pFrame->GetPose();
+    //需要将Tcw转换为SE3Quat
+    vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
+    vSE3->setId(0);
+    vSE3->setFixed(false);
+    optimizer.addVertex(vSE3);
+```
+
+### 设置edge
+对于每一对**地图点-特征点**添加重投影残差边：
+* [EdgeSE3ProjectXYZOnlyPose](ORB_SLAM3_G2oType.md#EdgeSE3ProjectXYZOnlyPose)
+	* 设置vertex：`g2o::VertexSE3Expmap`
+	* 设置观测**obs**：`keyPoint`
+	* 设置**信息矩阵**
+	* 设置**鲁棒核函数**：huber核
+	* 设置huber核的的δ
+	* 设置**相机内参**
+	* 设置**地图点**
+```cpp
+	Eigen::Matrix<double,2,1> obs;  
+	const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];  
+	obs << kpUn.pt.x, kpUn.pt.y;
+
+	// 新建节点，只优化位姿  
+   ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose* e = new ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose();
+
+	//设置vertex和观测
+   e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));  
+   e->setMeasurement(obs);  
+
+	//设置信息矩阵
+	const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];  
+	e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+
+	//设置huber核函数
+	g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;  
+	e->setRobustKernel(rk);  
+	rk->setDelta(deltaMono);
+
+	//设置相机内参
+	e->pCamera = pFrame->mpCamera;  
+	//设置地图点
+	cv::Mat Xw = pMP->GetWorldPos();  
+	e->Xw[0] = Xw.at<float>(0);  
+	e->Xw[1] = Xw.at<float>(1);  
+	e->Xw[2] = Xw.at<float>(2);
+  
+   optimizer.addEdge(e);
+```
+
 ### 优化策略
 * 分4次优化，每次迭代10次
 * 每次优化，评估每条重投影边的残差
