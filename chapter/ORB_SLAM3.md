@@ -3210,8 +3210,7 @@ $$
     mLastFrame.SetPose(Tlr * pRef->GetPose());
 ```
 对于**双目**或**RGBD**，为上一帧生成新的**临时地图点，主要是为了生成更多的匹配，让跟踪更好**
-* 临时地图点：对于**上一帧**中具有有效深度值`z>0`的特征点，如果这个**特征点**在**上一帧**中**没有**对应的地图点，或者创建后**没有被观测到**，添加为临时地图点
-  * 跟踪OK后，在创建新的关键帧前将临时地图点`mlpTemporalPoints`全部删除
+* 临时地图点：对于**上一帧**中具有有效深度值`z>0`的特征点，如果这个**特征点**在**上一帧**中**没有**对应的地图点`!pMP`，或者创建后**没有被观测到**`pMP->Observations()<1`，添加为临时地图点
 * 临时地图点也不是越多越好，当满足下面两个条件停止添加：
 	* 当前的点的深度已经超过了设定的深度阈值(**35倍基线**)，主要太远了不可靠
 	* **具有有效深度的点**已超过`100`个点，说明距离比较远了，可能不准确，这里是从近的开始添加
@@ -3278,7 +3277,28 @@ $$
 
     }
 ```
+跟踪OK后，在创建新的关键帧前将临时地图点`mlpTemporalPoints`全部删除
+
+```cpp
+if(bOK || mState==RECENTLY_LOST)
+{
+    ....
+    // Delete temporal MapPoints
+    for(list<MapPoint*>::iterator lit = mlpTemporalPoints.begin(), lend =  mlpTemporalPoints.end(); lit!=lend; lit++)
+    {
+        MapPoint* pMP = *lit;
+        delete pMP;
+    }
+    mlpTemporalPoints.clear();
+    
+    bool bNeedKF = NeedNewKeyFrame();
+}
+```
+
+
+
 ## 2.得到当前帧的初始位姿
+
 如果IMU已初始化并且不需要`reset`时，使用`PredictStateIMU`来预测当前帧的状态，就不用通过**匀速模型**来得到了
 ### PredictStateIMU
 这里有两个变量控制着从哪预测
@@ -3429,10 +3449,8 @@ $$
 T_{cw} = T_{cl}\cdot T_{lw}
 $$
 ```cpp
-mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose())
 ```
-
-
 
 然后，基于**投影的匹配搜索**[SearchByProjection](##SearchByProjection(TrackWithMotionModel))获得上一帧与当前帧的匹配关系，如果匹配太少`<20`，则会**扩大搜索窗口**
 
@@ -3480,8 +3498,6 @@ mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
 ```cpp
 Optimizer::PoseOptimization(&mCurrentFrame);
 ```
-
-
 
 ## 4.剔除当前帧中地图点中的外点
 ```cpp
@@ -4669,7 +4685,7 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
 ```
 ## SearchByProjection(TrackWithMotionModel)
 
-`SearchByProjection`函数接口：
+`SearchByProjection`主要通过将上一周的地图点投影到当前帧寻找两帧之间的匹配，其函数接口：
 
 ```cpp
 int ORBmatcher::SearchByProjection(
@@ -4726,7 +4742,8 @@ const float factor = 1.0f/HISTO_LENGTH;
 
 * 前进：$z > b$，物体在当前帧的图像上**变大**，因此对于上一帧的特征点，需要在当前帧**更高**的尺度上搜索
 * 后退：$z < -b$，物体在当前帧的图像上**变小**，因此对于上一帧的特征点，需要在当前帧**更低**的尺度上搜索
-![在这里插入图片描述](https://img-blog.csdnimg.cn/be2af519b6c449a09446d30c3385d268.png)
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/4e1ee7dffa184c1fb2d43c3bea10087c.png)
 
 
 ```cpp
@@ -5111,7 +5128,7 @@ int ORBmatcher::SearchByProjection(
 ```
 ## SearchByBow(Tracking)
 
-`SearchByBow`的函数接口为：
+`SearchByBow`主要通过`Bow`加速**当前帧**与**关键帧**之间的匹配，其函数接口为：
 
 ```cpp
 int ORBmatcher::SearchByBoW(
@@ -5124,15 +5141,10 @@ int ORBmatcher::SearchByBoW(
 ### 1.构造旋转直方图
 
 ```cpp
-        // 特征点角度旋转差统计用的直方图
-        vector<int> rotHist[HISTO_LENGTH];
-        for(int i=0;i<HISTO_LENGTH;i++)
-            rotHist[i].reserve(500);
-
-        // 将0~360的数转换到0~HISTO_LENGTH的系数
-        //! 原作者代码是 const float factor = 1.0f/HISTO_LENGTH; 是错误的，更改为下面代码  
-        // const float factor = HISTO_LENGTH/360.0f;
-        const float factor = 1.0f/HISTO_LENGTH;
+vector<int> rotHist[HISTO_LENGTH];
+for(int i=0;i<HISTO_LENGTH;i++)
+    rotHist[i].reserve(500);
+const float factor = 1.0f/HISTO_LENGTH;
 ```
 ### 2.对于`pKF`与`F`的`FeatureVector `，对属于**同一节点**的ORB特征进行匹配
 
